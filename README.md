@@ -308,14 +308,52 @@ Uma requisição aceita:
       "resource": {
         "resourceType": "Media",
         "id": "media-001",
-        "content": { ... }
+        "status": "completed",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/media-type",
+              "code": "image"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/12345"
+        },
+        "encounter": {
+          "reference": "Encounter/67890"
+        },
+        "createdDateTime": "2026-09-21T10:15:00Z",
+        "content": {
+          "contentType": "image/jpeg",
+          "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/..."
+        }
       }
     },
     {
       "resource": {
         "resourceType": "Media",
         "id": "media-002",
-        "content": { ... }
+        "status": "completed",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/media-type",
+              "code": "image"
+            }
+          ]
+        },
+        "subject": {
+          "reference": "Patient/12345"
+        },
+        "encounter": {
+          "reference": "Encounter/67890"
+        },
+        "createdDateTime": "2026-09-21T10:16:00Z",
+        "content": {
+          "contentType": "image/jpeg",
+          "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/..."
+        }
       }
     }
   ]
