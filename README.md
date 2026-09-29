@@ -2,13 +2,24 @@
 
 API responsável pela recepção de imagens clínicas que serão posteriormente analisadas pelo **Core do HealPlus**.
 
-Aplicação Core do HealPlus:
-
-https://github.com/healplus/healplus
+**Aplicação Core do HealPlus:** https://github.com/healplus/healplus
 
 ---
 
-## 1. Visão geral
+## 📋 Índice
+
+1. [Visão Geral](#1-visão-geral)
+2. [Estado Atual do Projeto](#2-estado-atual-do-projeto)
+3. [Arquitetura](#3-arquitetura)
+4. [Como Rodar](#4-como-rodar)
+5. [Endpoints Atuais](#5-endpoints-atuais)
+6. [Requisitos Funcionais (Futuro)](#6-requisitos-funcionais-futuro)
+7. [Estrutura de Pastas](#7-estrutura-de-pastas)
+8. [Desenvolvimento](#8-desenvolvimento)
+
+---
+
+## 1. Visão Geral
 
 A API recebe imagens clínicas no padrão **HL7 FHIR R4**, utilizando o recurso `Media`.
 
@@ -24,321 +35,254 @@ O processamento das imagens é **assíncrono**:
 
 ---
 
-# 2. Principais endpoints
+## 2. Estado Atual do Projeto
 
-## 2.1. Intake de imagens para análise
+### ✅ Implementado
 
-Recebe uma ou várias imagens clínicas para processamento.
+- [x] **Arquitetura em 3 camadas** (Routes → Services → Repositories)
+- [x] **Tratamento robusto de erros** com HTTP status codes apropriados
+- [x] **Gerenciamento de sessão de banco de dados** com rollback automático
+- [x] **Type hints** em todas as funções
+- [x] **Docstrings** completas em services e routes
+- [x] **Logging** integrado para debugging
+- [x] **Endpoints básicos** para CRUD de imagens (GET, POST)
 
-### Endpoint
+### 🔄 Em Desenvolvimento
 
-```http
-POST /api/v1/analyses
-Content-Type: application/fhir+json
+- [ ] **FHIR Bundle Support** (múltiplas imagens por requisição)
+- [ ] **Media Resource** (estrutura completa FHIR)
+- [ ] **analysisId Generation** e tracking
+- [ ] **Analysis Status Tracking** (ACCEPTED, QUEUED, PROCESSING, COMPLETED, FAILED)
+- [ ] **Async Processing** com background tasks
+- [ ] **Webhook Integration** (HealPlus Core + notificações de cliente)
+- [ ] **Authentication** e credenciais de cliente
+- [ ] **Test Suite** completo
+
+---
+
+## 3. Arquitetura
+
+### 3.1 Padrão 3-Layer
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    HTTP Request                         │
+└──────────────────────┬──────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  Routes (api/routes/)     - HTTP Layer                  │
+│  • Endpoints HTTP                                       │
+│  • Validação com Pydantic                               │
+│  • Delegação para services                              │
+└──────────────────────┬──────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  Services (services/)      - Business Logic Layer       │
+│  • Orquestração de operações                            │
+│  • Try/except + error handling                          │
+│  • db.rollback() em exceções                            │
+│  • Logging                                              │
+└──────────────────────┬──────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  Repositories (repositories/)  - Data Access Layer      │
+│  • db.query(), db.add(), db.commit()                    │
+│  • Sem error handling (delegado ao service)             │
+│  • Sem dependências HTTP/service                        │
+└──────────────────────┬──────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│            PostgreSQL Database                          │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### Response
+### 3.2 Responsabilidades por Camada
 
-A API deve responder imediatamente após aceitar as imagens, sem aguardar a conclusão da análise.
+**Routes** (`api/routes/image.py`)
+- Definem endpoints HTTP
+- Validam entrada com Pydantic
+- Delegam ao service
+- Retornam respostas HTTP
+- Status codes apropriados
+
+**Services** (`services/image.py`)
+- Orquestram lógica de negócio
+- Chamam repositories
+- Try/except com error handling
+- Mapeiam exceções para HTTP status codes
+- Fazem logging
+- db.rollback() em erros
+
+**Repositories** (`repositories/image.py`)
+- Acesso puro a dados
+- db.query(), db.add(), db.commit()
+- Sem tratamento de erro (delegado ao service)
+- Sem dependências externas
+
+**Database** (`core/database.py`)
+- Gerencia sessão de banco
+- Rollback automático em exceções
+- Close automático em finally
+
+---
+
+## 4. Como Rodar
+
+### 4.1 Pré-requisitos
+
+- Python ≥ 3.12
+- PostgreSQL (local ou via Docker)
+- `uv` package manager
+
+### 4.2 Instalação
+
+```bash
+# Clonar repositório
+git clone <repo>
+cd healplus_intake_image_api
+
+# Criar arquivo .env (copiar de .env.example se existir)
+cp .env.example .env
+# Editar .env com credenciais do banco de dados local
+
+# Sincronizar dependências
+uv sync
+```
+
+### 4.3 Banco de Dados
+
+#### Opção 1: PostgreSQL Local
+
+```bash
+# Criar banco de dados
+createdb healplus
+
+# Criar tabelas (após rodar a API uma vez)
+# As tabelas são criadas automaticamente pelo SQLAlchemy
+```
+
+#### Opção 2: PostgreSQL com Docker
+
+```bash
+# Rodar containers (via docker-compose)
+docker-compose up -d
+
+# Criar banco (opcional, container cria automaticamente)
+```
+
+### 4.4 Rodar a Aplicação
+
+```bash
+# Modo desenvolvimento com auto-reload
+uv run fastapi dev src/healplus_intake_image_api/main.py
+
+# Modo produção
+uv run fastapi run src/healplus_intake_image_api/main.py
+```
+
+A API estará disponível em: **http://localhost:8000**
+
+**Documentação interativa:** http://localhost:8000/docs
+
+---
+
+## 5. Endpoints Atuais
+
+### 5.1 Criar Imagem
 
 ```http
-HTTP/1.1 202 Accepted
+POST /images/
 Content-Type: application/json
-```
 
-```json
 {
-  "analysisId": "a7f31c4e-8e3d-4b6d-9a12-123456789abc",
-  "status": "accepted",
-  "statusUrl": "/api/v1/analyses/a7f31c4e-8e3d-4b6d-9a12-123456789abc"
+  "name": "raio-x-torax-01"
 }
 ```
 
-### Payload FHIR
+**Respostas:**
+- `201 Created` - Imagem criada com sucesso
+- `409 Conflict` - Imagem com estes dados já existe
+- `503 Service Unavailable` - Banco indisponível
+- `500 Internal Server Error` - Erro inesperado
 
-O payload utiliza um `Bundle` contendo um ou vários recursos `Media`.
-
+**Exemplo de resposta (201):**
 ```json
 {
-  "resourceType": "Bundle",
-  "type": "collection",
-  "entry": [
-    {
-      "resource": {
-        "resourceType": "Media",
-        "id": "media-001",
-        "status": "completed",
-        "type": {
-          "coding": [
-            {
-              "system": "http://terminology.hl7.org/CodeSystem/media-type",
-              "code": "image"
-            }
-          ]
-        },
-        "subject": {
-          "reference": "Patient/12345"
-        },
-        "encounter": {
-          "reference": "Encounter/67890"
-        },
-        "createdDateTime": "2026-09-21T10:15:00Z",
-        "content": {
-          "contentType": "image/jpeg",
-          "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/..."
-        }
-      }
-    },
-    {
-      "resource": {
-        "resourceType": "Media",
-        "id": "media-002",
-        "status": "completed",
-        "type": {
-          "coding": [
-            {
-              "system": "http://terminology.hl7.org/CodeSystem/media-type",
-              "code": "image"
-            }
-          ]
-        },
-        "subject": {
-          "reference": "Patient/12345"
-        },
-        "encounter": {
-          "reference": "Encounter/67890"
-        },
-        "createdDateTime": "2026-09-21T10:16:00Z",
-        "content": {
-          "contentType": "image/jpeg",
-          "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/..."
-        }
-      }
-    }
-  ]
+  "id": 1,
+  "name": "raio-x-torax-01"
 }
 ```
 
-### Estrutura do lote
-
-```text
-Bundle
-│
-├── Media 001
-│   └── JPEG Base64
-│
-└── Media 002
-    └── JPEG Base64
-```
-
----
-
-## 2.2. Consulta do status da análise
-
-Permite consultar o estado atual de uma análise.
-
-### Endpoint
+### 5.2 Obter Todas as Imagens
 
 ```http
-GET /api/v1/analyses/{analysisId}
+GET /images/
 ```
 
-### Estados da análise
+**Respostas:**
+- `200 OK` - Lista de imagens
+- `500 Internal Server Error` - Erro inesperado
 
-A análise pode assumir os seguintes estados:
-
-```text
-ACCEPTED
-QUEUED
-PROCESSING
-COMPLETED
-FAILED
-```
-
-### Exemplo de resposta
-
+**Exemplo de resposta (200):**
 ```json
-{
-  "analysisId": "a7f31c4e-8e3d-4b6d-9a12-123456789abc",
-  "status": "PROCESSING"
-}
+[
+  {
+    "id": 1,
+    "name": "raio-x-torax-01"
+  },
+  {
+    "id": 2,
+    "name": "raio-x-torax-02"
+  }
+]
 ```
 
----
-
-## 2.3. Consulta do resultado da análise
-
-Permite consultar o resultado de uma análise concluída.
-
-### Endpoint
+### 5.3 Obter Imagem Específica
 
 ```http
-GET /api/v1/analyses/{analysisId}/result
+GET /images/{image_id}
 ```
 
-O resultado deverá estar disponível após o processamento da análise.
+**Respostas:**
+- `200 OK` - Imagem encontrada
+- `404 Not Found` - Imagem não existe
+- `500 Internal Server Error` - Erro inesperado
 
----
-
-# 3. Integrações via Webhook
-
-A API possui dois fluxos de notificação por webhook.
-
-## 3.1. Webhook para o HealPlus Core
-
-Sempre que uma nova imagem for recebida e aceita pela API (`ACCEPTED`), o **HealPlus Core** deve ser notificado.
-
-O webhook deverá fornecer os dados necessários para que o Core identifique a análise, a imagem e o contexto clínico associado.
-
-### Fluxo
-
-```text
-Sistema cliente
-      │
-      │ POST /api/v1/analyses
-      ▼
-Image Intake API
-      │
-      │ 202 Accepted
-      ▼
-      │
-      └──────────────► Webhook
-                         │
-                         ▼
-                    HealPlus Core
-                         │
-                         ▼
-                  Análise da imagem
-```
-
-Os dados enviados ao Core devem permitir identificar, quando aplicável:
-
-- `analysisId`
-- Identificador da imagem (`Media.id`)
-- Paciente (`Patient`)
-- Atendimento (`Encounter`)
-- Data/hora da captura
-- Demais informações necessárias para processamento
-
----
-
-## 3.2. Webhook para o sistema cliente
-
-Além do endpoint de consulta:
-
-```http
-GET /api/v1/analyses/{analysisId}/result
-```
-
-a API deverá permitir a configuração de um **webhook de resultado**.
-
-Quando a análise for concluída, a API deverá notificar o sistema que originalmente enviou as imagens.
-
-### Fluxo
-
-```text
-Sistema cliente
-      │
-      │ Envia imagens
-      ▼
-Image Intake API
-      │
-      │ Processamento assíncrono
-      ▼
-HealPlus Core
-      │
-      │ Resultado
-      ▼
-Image Intake API
-      │
-      │ Webhook
-      ▼
-Sistema cliente
-```
-
-O webhook deve permitir que o sistema cliente receba a notificação de conclusão sem precisar realizar consultas periódicas ao endpoint de resultado.
-
----
-
-# 4. Configurações da API
-
-## 4.1. Configuração do webhook de resultado
-
-A API deverá disponibilizar uma configuração para que cada sistema cliente possa informar o endpoint que receberá as notificações de resultado.
-
-### Exemplo conceitual
-
+**Exemplo de resposta (200):**
 ```json
 {
-  "webhookUrl": "https://cliente.example.com/webhooks/analysis-result"
+  "id": 1,
+  "name": "raio-x-torax-01"
 }
 ```
 
 ---
 
-# 5. Autenticação e credenciais de integração
+## 6. Requisitos Funcionais (Futuro)
 
-## 5.1. Geração de Client ID e Secret
+### 6.1 Padrão de Dados
 
-A API deverá disponibilizar um endpoint para geração das credenciais utilizadas pelos sistemas clientes na integração.
+Utilizar **HL7 FHIR R4** com o recurso `Media` para representar as imagens clínicas.
 
-O endpoint deverá gerar:
+### 6.2 Tipos de Imagem
 
-- `client_id`
-- `client_secret`
+Inicialmente: **JPEG (image/jpeg)**
 
-Essas credenciais serão utilizadas pelo sistema cliente para autenticar as requisições de envio de imagens.
+Fotografias capturadas por câmeras de celulares durante atendimento.
 
-### Exemplo conceitual de resposta
+### 6.3 Contexto Clínico
 
-```json
-{
-  "client_id": "client-123456",
-  "client_secret": "xxxxxxxxxxxxxxxxxxxxxxxx"
-}
-```
+Cada recurso `Media` deve permitir associação com:
 
-> O mecanismo de autenticação e o formato definitivo dos tokens deverão ser definidos na especificação de segurança da API.
-
----
-
-# 6. Requisitos obrigatórios da API de Intake
-
-## 6.1. Padrão de dados
-
-Utilizar **HL7 FHIR R4**, utilizando o recurso `Media` para representar as imagens clínicas.
-
----
-
-## 6.2. Tipo de imagem
-
-Inicialmente, a API deverá aceitar:
-
-```text
-JPEG (image/jpeg)
-```
-
-As imagens serão fotografias capturadas por câmeras de celulares durante o atendimento ao paciente.
-
----
-
-## 6.3. Contexto clínico
-
-Cada recurso `Media` deverá permitir associação com o contexto clínico da imagem.
-
-Quando aplicável, deverá ser possível informar:
-
-- `Patient`
-- `Encounter`
+- `Patient` - Paciente associado
+- `Encounter` - Atendimento
 - Data/hora da captura
 - Profissional responsável
 - Dispositivo utilizado
 
----
+### 6.4 Upload de Imagem
 
-## 6.4. Upload da imagem
-
-Inicialmente, a imagem deverá ser enviada diretamente no payload FHIR através de `Attachment`.
+Imagem enviada no payload FHIR via `Attachment`:
 
 ```json
 {
@@ -349,130 +293,217 @@ Inicialmente, a imagem deverá ser enviada diretamente no payload FHIR através 
 }
 ```
 
-Onde:
+### 6.5 Múltiplas Imagens
 
-- `contentType` identifica o formato da imagem.
-- `data` contém a imagem codificada em Base64.
-
----
-
-## 6.5. Suporte a múltiplas imagens
-
-Uma única requisição deverá permitir o envio de:
-
+Uma requisição aceita:
 - Uma imagem; ou
-- Múltiplas imagens.
+- Múltiplas imagens em um FHIR `Bundle`
 
-Para múltiplas imagens, deverá ser utilizado um FHIR `Bundle` contendo múltiplos recursos `Media`.
+```json
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Media",
+        "id": "media-001",
+        "content": { ... }
+      }
+    },
+    {
+      "resource": {
+        "resourceType": "Media",
+        "id": "media-002",
+        "content": { ... }
+      }
+    }
+  ]
+}
+```
 
-```text
-Bundle
-│
-├── Media
-│   └── JPEG Base64
-│
-├── Media
-│   └── JPEG Base64
-│
-└── Media
-    └── JPEG Base64
+### 6.6 Processamento Assíncrono
+
+- API **não aguarda** conclusão da análise
+- Retorna **HTTP 202 Accepted** com `analysisId`
+- Processamento ocorre em background
+- Core HealPlus notificado via webhook
+- Cliente consulta status via endpoint
+
+### 6.7 Status da Análise
+
+Possíveis estados:
+- `ACCEPTED` - Recebida e validada
+- `QUEUED` - Aguardando processamento
+- `PROCESSING` - Sendo processada
+- `COMPLETED` - Análise concluída
+- `FAILED` - Falha no processamento
+
+---
+
+## 7. Estrutura de Pastas
+
+```
+healplus_intake_image_api/
+├── README.md                          # Este arquivo
+├── copilot-instructions.md           # Instruções para Copilot
+├── pyproject.toml                    # Dependências e configuração
+├── uv.lock                           # Lock file de dependências
+├── .env                              # Variáveis de ambiente (não commitar!)
+├── .env.example                      # Template do .env
+├── .gitignore                        # Arquivos ignorados pelo Git
+├── docker/                           # Configuração Docker
+│   └── Dockerfile                    # Build da aplicação
+├── compose.yaml                      # Docker Compose (dev environment)
+└── src/healplus_intake_image_api/
+    ├── __init__.py
+    ├── main.py                       # Aplicação FastAPI (entry point)
+    ├── core/
+    │   ├── __init__.py
+    │   ├── config.py                 # Settings (environment variables)
+    │   └── database.py               # SQLAlchemy + session management
+    ├── api/
+    │   ├── __init__.py
+    │   └── routes/
+    │       ├── __init__.py
+    │       └── image.py              # Endpoints de imagem
+    ├── models/
+    │   ├── __init__.py
+    │   └── image.py                  # SQLAlchemy ORM models
+    ├── schemas/
+    │   ├── __init__.py
+    │   └── image.py                  # Pydantic schemas (request/response)
+    ├── services/
+    │   ├── __init__.py
+    │   └── image.py                  # Business logic + error handling
+    └── repositories/
+        ├── __init__.py
+        └── image.py                  # Data access layer
 ```
 
 ---
 
-## 6.6. Processamento assíncrono
+## 8. Desenvolvimento
 
-O processamento das imagens deverá ser assíncrono.
+### 8.1 Padrão de Erro Handling
 
-A API **não deve manter a requisição HTTP aberta aguardando a conclusão da análise**.
+Todos os serviços devem seguir este padrão:
 
-O fluxo esperado é:
+```python
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError, OperationalError
 
-```text
-1. Cliente envia imagens
-          │
-          ▼
-2. API valida e aceita
-          │
-          ▼
-3. API retorna HTTP 202
-          │
-          ▼
-4. API gera analysisId
-          │
-          ▼
-5. Processamento assíncrono
-          │
-          ▼
-6. HealPlus Core realiza análise
-          │
-          ▼
-7. Resultado armazenado
-          │
-          ├──► Webhook para cliente
-          │
-          └──► GET /api/v1/analyses/{analysisId}/result
+def create_image(db: Session, image: ImageCreate) -> Image:
+    """Criar imagem com tratamento de erros."""
+    try:
+        return repo_create_image(db, image)
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"Erro de integridade: {e}")
+        raise HTTPException(status_code=409, detail="Resource conflict")
+    except OperationalError as e:
+        db.rollback()
+        logger.error(f"Erro operacional: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro inesperado: {e}")
+        raise HTTPException(status_code=500, detail="Internal error")
+```
+
+### 8.2 HTTP Status Codes
+
+| Code | Significado | Quando Usar |
+|------|-------------|------------|
+| `201` | Created | Recurso criado com sucesso |
+| `200` | OK | Operação bem-sucedida (GET) |
+| `202` | Accepted | Requisição aceita para processamento assíncrono |
+| `400` | Bad Request | Validação Pydantic falhou |
+| `404` | Not Found | Recurso não existe |
+| `409` | Conflict | IntegrityError (constraint violation) |
+| `503` | Unavailable | OperationalError (DB down) |
+| `500` | Server Error | Exceção inesperada |
+
+### 8.3 Type Hints
+
+Sempre usar type hints:
+
+```python
+def get_image(db: Session, image_id: int) -> Image | None:
+    """Buscar imagem por ID."""
+    ...
+```
+
+### 8.4 Logging
+
+Sempre logar erros no service:
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+logger.error(f"Database error: {e}")
+logger.info(f"Image created: {image.id}")
+```
+
+### 8.5 Docstrings
+
+Todo service e route deve ter docstring:
+
+```python
+def create_image(db: Session, image: ImageCreate) -> Image:
+    """Create a new image.
+    
+    Args:
+        db: Database session
+        image: Image data
+        
+    Returns:
+        Created image
+        
+    Raises:
+        HTTPException: On database errors
+    """
+```
+
+### 8.6 Rodando Testes
+
+```bash
+# Instalar pytest
+uv pip install pytest pytest-asyncio
+
+# Rodar testes
+pytest tests/
+
+# Com cobertura
+pytest --cov=src tests/
+```
+
+### 8.7 Linting e Formatting
+
+```bash
+# Ruff (linter)
+uv run ruff check src/
+
+# Black (formatter)
+uv run black src/
 ```
 
 ---
 
-# 7. Resumo dos endpoints
+## 📞 Contato
 
-| Método | Endpoint | Finalidade |
-|---|---|---|
-| `POST` | `/api/v1/analyses` | Receber uma ou várias imagens para análise |
-| `GET` | `/api/v1/analyses/{analysisId}` | Consultar o status da análise |
-| `GET` | `/api/v1/analyses/{analysisId}/result` | Consultar o resultado da análise |
-| `POST` | `Webhook do HealPlus Core` | Notificar o Core sobre novas imagens |
-| `POST` | `Webhook do cliente` | Notificar o cliente sobre o resultado |
-| `POST` | `Endpoint de credenciais` | Gerar `client_id` e `client_secret` |
+**Autor:** wolley silva  
+**Email:** wolleyws@gmail.com  
+**GitHub:** https://github.com/healplus
 
 ---
 
-# 8. Tecnologias e padrões
+## 📜 Licença
 
-A API deverá utilizar inicialmente:
+[Adicionar informação de licença aqui]
 
-- **HL7 FHIR R4**
-- **FHIR Media**
-- **FHIR Bundle**
-- **JPEG**
-- **Base64**
-- **Fast API**
-- **Processamento assíncrono**
-- **Webhooks**
-- **PostgreSQL**
+---
 
-## 9. Arquitetura
-
-- ** Exemplo: Cadastro e listagem de imagens **
-
-                         HTTP
-                          │
-                          ▼
-                ┌─────────────────┐
-                │     Router      │
-                │   api/routes    │
-                └────────┬────────┘
-                         │
-                    ImageCreate
-                         │
-                         ▼
-                ┌─────────────────┐
-                │     Service     │
-                │    use case     │
-                └────────┬────────┘
-                         │
-                         ▼
-                ┌─────────────────┐
-                │   Repository    │
-                └────────┬────────┘
-                         │
-                         ▼
-                ┌─────────────────┐
-                │ SQLAlchemy Model│
-                │      Image      │
-                └────────┬────────┘
-                         │
-                         ▼
-                    PostgreSQL
+**Última atualização:** Setembro 2026  
+**Versão:** 0.1.0
