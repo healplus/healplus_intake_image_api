@@ -4,6 +4,32 @@
 **Escopo:** contrato de intake de avaliações clínicas de feridas da API HealPlus.  
 **Versão normativa:** FHIR R4 4.0.1.
 
+## Status atual de implementação (2026-10-21)
+
+### Implementado na branch atual
+
+- Operação de sistema `POST /api/fhir/r4/$avaliar-feridas` com `Parameters`
+  contendo `Bundle.type = collection`.
+- Schemas clínicos em `schemas/avaliacao_ferida.py` com validação estrutural e
+  semântica das referências internas do Bundle.
+- Persistência transacional de `Bundle`, `Media` e `Task`, além da tabela
+  `entradas_pacote` para rastreabilidade de todas as entradas do Bundle.
+- Leituras FHIR para `Task`, `Bundle`, `Media`, `Encounter`, `Condition` e
+  `Observation`.
+- Publicação de `CapabilityStatement`, `OperationDefinition` e perfis
+  `StructureDefinition` do escopo clínico HealPlus.
+- Suíte automatizada atual com `13` testes passando em `pytest -q`.
+
+### Pendências em relação ao estado-alvo desta especificação
+
+- A modelagem relacional clínica completa da seção 8.3 (tabelas dedicadas para
+  `Patient`, `Practitioner`, `Encounter`, `Condition`, `Observation`,
+  `Provenance` e associações) ainda não foi materializada; neste momento os
+  recursos não-`Media` são preservados e consultados por `entradas_pacote`.
+- O requisito de política de autenticação/autorização/auditoria para exposição
+  de dados clínicos sensíveis permanece como pré-requisito de hardening para
+  evolução do escopo de leitura.
+
 ## 1. Decisões de interoperabilidade
 
 O recurso clínico principal é `Condition`: uma instância representa **uma
@@ -744,14 +770,17 @@ HealPlus são ilustrativos e precisam ser formalizados nos `ValueSet` e
 }
 ```
 
-## 7. Impacto no contrato atual
+## 7. Impacto no contrato legado
 
-O contrato atual persiste `Parameters`, `Bundle`, `Media` e `Task`. Para
-implementar esta especificação, deve adicionar os perfis, validações e
-persistência de `Patient`, `Encounter`, `Condition`, `Observation`,
-`Practitioner` e `Provenance`, mantendo `Task` somente para o ciclo assíncrono.
-Não é seguro codificar os requisitos RC01a–RC12a como extensões ad hoc em
-`Media`: eles têm semântica clínica própria em FHIR R4.
+A rota legada de intake focada em imagem foi substituída por
+`$avaliar-feridas`. O estado atual já contempla perfis e validações clínicas
+no payload FHIR, mantendo `Task` no ciclo assíncrono.
+
+Como evolução, a persistência relacional dedicada para
+`Patient`/`Practitioner`/`Encounter`/`Condition`/`Observation`/`Provenance`
+ainda deve ser concluída para atingir integralmente o modelo-alvo descrito na
+seção 8.3. Não é seguro codificar os requisitos RC01a–RC12a como extensões ad
+hoc em `Media`: eles têm semântica clínica própria em FHIR R4.
 
 ## 8. Mapeamento das modificações necessárias na API
 
@@ -762,15 +791,15 @@ Ela é um mapa de implementação; não altera o contrato em produção por si s
 
 | Atual | Modificação necessária | Arquivos afetados |
 |---|---|---|
-| `POST /api/fhir/r4/$submit-media` aceita somente `Bundle.entry.resource: Media`. | Substituir diretamente por `POST /api/fhir/r4/$avaliar-feridas`, com `Parameters.parameter[name="bundle"].resource` no perfil `HealPlusAvaliacaoFerida`. Não manter rota legada. | `src/healplus_intake_image_api/api/routes/image.py` → renomear para `assessment.py`; `src/healplus_intake_image_api/main.py`; `README.md`. |
-| `SubmitMediaParameters` e `FHIRBundleCreate` aceitam um ou mais `Media`. | Criar `AvaliacaoFeridaParameters` e `BundleAvaliacaoFerida`, com entradas tipadas para `Patient`, `Practitioner`, `Device`, `Encounter`, `Condition`, `Media`, os oito tipos de `Observation` e `Provenance`. | Novo `src/healplus_intake_image_api/schemas/assessment.py`; `src/healplus_intake_image_api/schemas/image.py`. |
-| O `Task.focus` aponta para o Bundle, mas `Task.for` usa a referência enviada pelo cliente. | Manter `Task.focus = Bundle/{id}`; preencher `Task.for = Patient/{id}` somente após resolver a referência interna do Bundle. | `repositories/image.py` → renomear para `repositories/assessment.py`; `schemas/task.py`. |
+| `POST /api/fhir/r4/$submit-media` aceita somente `Bundle.entry.resource: Media`. | Substituir diretamente por `POST /api/fhir/r4/$avaliar-feridas`, com `Parameters.parameter[name="bundle"].resource` no perfil `HealPlusAvaliacaoFerida`. Não manter rota legada. | `src/healplus_intake_image_api/api/routes/imagem.py` → renomear para `avaliacao_ferida.py`; `src/healplus_intake_image_api/main.py`; `README.md`. |
+| `SubmitMediaParameters` e `FHIRBundleCreate` aceitam um ou mais `Media`. | Criar `AvaliacaoFeridaParameters` e `BundleAvaliacaoFerida`, com entradas tipadas para `Patient`, `Practitioner`, `Device`, `Encounter`, `Condition`, `Media`, os oito tipos de `Observation` e `Provenance`. | `src/healplus_intake_image_api/schemas/imagem.py` → renomear para `avaliacao_ferida.py`. |
+| O `Task.focus` aponta para o Bundle, mas `Task.for` usa a referência enviada pelo cliente. | Manter `Task.focus = Bundle/{id}`; preencher `Task.for = Patient/{id}` somente após resolver a referência interna do Bundle. | `repositories/imagem.py` → renomear para `repositories/avaliacao_ferida.py`; `schemas/task.py`. |
 
 ### 8.2 Schemas, perfis e validação
 
 | Elemento atual | Modificação necessária | Regra de validação |
 |---|---|---|
-| `schemas/image.py` concentra primitivas FHIR, `MediaCreate` e o Bundle atual. | Extrair `FHIRResource`, `Meta`, `Identifier`, `Coding`, `CodeableConcept`, `Reference`, `Attachment` e `resource_json` para `schemas/fhir.py`. `schemas/image.py` passa a conter somente o perfil `Media`; `schemas/assessment.py` reutiliza essas primitivas. | Preservar aliases FHIR JSON e `extra="allow"` para campos FHIR não indexados. |
+| `schemas/imagem.py` concentra primitivas FHIR, `MediaCreate` e o Bundle atual. | Extrair `FHIRResource`, `Meta`, `Identifier`, `Coding`, `CodeableConcept`, `Reference`, `Attachment` e `resource_json` para `schemas/fhir.py`; renomear o módulo restante para `schemas/avaliacao_ferida.py`. | Preservar aliases FHIR JSON e `extra="allow"` para campos FHIR não indexados. |
 | `BundleEntryCreate.resource` é sempre `MediaCreate`. | Usar uma união discriminada pelo campo `resourceType` para os recursos permitidos. Cada entrada deve ter `fullUrl` obrigatório e único. | Rejeitar `resourceType` não permitido, `fullUrl` duplicado e `entry.request`/`entry.response` em Bundle `collection`. |
 | A única regra de referência é `Media.subject.reference`. | Implementar um resolvedor semântico de referências de Bundle: índice por `entry.fullUrl` e por `<resourceType>/<id>`. | Rejeitar referência interna inexistente, tipo de destino incorreto, paciente diferente, Encounter diferente ou `Observation.focus` que não aponte para a `Condition` da ferida. |
 | `MediaCreate` aceita Encounter, operador e body site como opcionais. | Tornar `subject`, `encounter`, `createdDateTime`, `operator`, `bodySite`, `content.contentType` e `content.data` obrigatórios. | Rejeitar ausência de `Encounter`; captura remota não integra este contrato. |
@@ -787,17 +816,17 @@ não possuem o conjunto completo de referências.
 
 | Estrutura atual | Modificação necessária | Índices e integridade |
 |---|---|---|
-| `fhir_bundles` guarda o Bundle e se relaciona somente com `media` e `analysis_tasks`. | Manter a tabela como registro do pacote de intake e criar `bundle_entries` para representar toda entrada do Bundle. | `bundle_entries` contém `bundle_id`, `entry_index`, `full_url`, `resource_type` e `resource_id`; unicidade em `(bundle_id, full_url)` e `(bundle_id, entry_index)`. Preservar `resource_json`, `version_id` e `last_updated`. |
-| Não há entidade para o paciente. | Criar `fhir_patients`: `id`, `identifier_system`, `identifier_value`, `resource_json`, `version_id`, `last_updated`. | Índice único em `(identifier_system, identifier_value)` quando ambos existirem. |
-| Não há entidade para o profissional. | Criar `practitioners`: `id`, `identifier_system`, `identifier_value`, `resource_json`, `version_id`, `last_updated`; criar as associações `encounter_participants`, `observation_performers` e `provenance_agents`. | Índice único em `(identifier_system, identifier_value)` quando ambos existirem. As associações preservam as cardinalidades repetíveis de `Encounter.participant`, `Observation.performer` e `Provenance.agent`. |
-| Não há entidade de atendimento. | Criar `clinical_encounters`: `id`, `patient_id`, `status`, `class_system`, `class_code`, `period_start`, `period_end`, `resource_json`, metadados de versão. | FK para `fhir_patients`; índices em `patient_id` e `period_start`. |
-| Não há entidade de ferida. | Criar `wound_conditions`: `id`, `patient_id`, `encounter_id`, `clinical_status`, `verification_status`, `code_system`, `code`, `body_site_system`, `body_site_code`, `recorded_date`, `resource_json`, metadados de versão. | FKs para Patient e Encounter; índices em `patient_id`, `encounter_id` e `recorded_date`. |
-| A tabela `media` armazena referências como texto. | Acrescentar `patient_id`, `encounter_id`, `body_site_system`, `body_site_code` e FK para as novas tabelas. Manter `subject_reference` e `encounter_reference` como cópia do recurso FHIR serializado, se necessário para compatibilidade de leitura. | Índices em `patient_id` e `encounter_id`; validação garante coerência com a `Condition`. |
-| Não há armazenamento de achados. | Criar `clinical_observations`: `id`, `bundle_id`, `patient_id`, `encounter_id`, `wound_condition_id`, `device_id` opcional, `code_system`, `code`, `effective_date_time`, `issued`, `resource_json`, metadados de versão; criar `observation_media` para `Observation.derivedFrom`. | FKs para Bundle, Patient, Encounter, Condition e Device; índices em `(wound_condition_id, effective_date_time)` e em `code`. `observation_media` usa PK composta `(observation_id, media_id)` e suporta múltiplas fotografias por Observation. Os componentes permanecem no JSON FHIR nesta etapa. |
-| Não há dispositivo ou autoria. | Criar `analysis_devices`, `provenance_records`, `provenance_agents` e `provenance_targets`. | `analysis_devices` indexa `(manufacturer, version)`. `provenance_targets` guarda `target_resource_type`, `target_resource_id` e `target_reference`; sua integridade polimórfica é validada pelo resolvedor de referências antes da gravação. |
-| A migração atual é `20261005_01_fhir_image_intake.py`. | Criar uma nova revisão Alembic, sem editar a migração já aplicada. | Adicionar novas colunas inicialmente anuláveis, preencher apenas novos intakes e endurecer cardinalidades em um passo posterior somente se os dados existentes forem compatíveis. |
+| `pacotes_fhir` guarda o Bundle e se relaciona somente com `imagens_clinicas` e `tarefas_analise`. | Manter a tabela como registro do pacote de intake e criar `entradas_pacote` para representar toda entrada do Bundle. | `entradas_pacote` contém `pacote_id`, `indice_entrada`, `url_completa`, `tipo_recurso` e `recurso_id`; unicidade em `(pacote_id, url_completa)` e `(pacote_id, indice_entrada)`. Preservar `recurso_json`, `versao_id` e `atualizado_em`. |
+| Não há entidade para o paciente. | Criar `pacientes_fhir`: `id`, `identificador_sistema`, `identificador_valor`, `recurso_json`, `versao_id`, `atualizado_em`. | Índice único em `(identificador_sistema, identificador_valor)` quando ambos existirem. |
+| Não há entidade para o profissional. | Criar `profissionais`: `id`, `identificador_sistema`, `identificador_valor`, `recurso_json`, `versao_id`, `atualizado_em`; criar as associações `participantes_atendimento`, `executantes_observacao` e `agentes_proveniencia`. | Índice único em `(identificador_sistema, identificador_valor)` quando ambos existirem. As associações preservam as cardinalidades repetíveis de `Encounter.participant`, `Observation.performer` e `Provenance.agent`. |
+| Não há entidade de atendimento. | Criar `atendimentos_clinicos`: `id`, `paciente_id`, `status`, `classe_sistema`, `classe_codigo`, `periodo_inicio`, `periodo_fim`, `recurso_json`, metadados de versão. | FK para `pacientes_fhir`; índices em `paciente_id` e `periodo_inicio`. |
+| Não há entidade de ferida. | Criar `condicoes_ferida`: `id`, `paciente_id`, `atendimento_id`, `status_clinico`, `status_verificacao`, `codigo_sistema`, `codigo`, `localizacao_sistema`, `localizacao_codigo`, `data_registro`, `recurso_json`, metadados de versão. | FKs para Patient e Encounter; índices em `paciente_id`, `atendimento_id` e `data_registro`. |
+| A tabela `imagens_clinicas` armazena referências como texto. | Acrescentar `paciente_id`, `atendimento_id`, `localizacao_sistema`, `localizacao_codigo` e FK para as novas tabelas. Manter `referencia_assunto` e `referencia_atendimento` como cópia do recurso FHIR serializado, se necessário para compatibilidade de leitura. | Índices em `paciente_id` e `atendimento_id`; validação garante coerência com a `Condition`. |
+| Não há armazenamento de achados. | Criar `observacoes_clinicas`: `id`, `pacote_id`, `paciente_id`, `atendimento_id`, `condicao_ferida_id`, `dispositivo_id` opcional, `codigo_sistema`, `codigo`, `data_hora_efetiva`, `emitido_em`, `recurso_json`, metadados de versão; criar `observacoes_imagens` para `Observation.derivedFrom`. | FKs para Bundle, Patient, Encounter, Condition e Device; índices em `(condicao_ferida_id, data_hora_efetiva)` e em `codigo`. `observacoes_imagens` usa PK composta `(observacao_id, imagem_id)` e suporta múltiplas fotografias por Observation. Os componentes permanecem no JSON FHIR nesta etapa. |
+| Não há dispositivo ou autoria. | Criar `dispositivos_analise`, `registros_proveniencia`, `agentes_proveniencia` e `alvos_proveniencia`. | `dispositivos_analise` indexa `(fabricante, versao)`. `alvos_proveniencia` guarda `tipo_recurso_alvo`, `recurso_alvo_id` e `referencia_alvo`; sua integridade polimórfica é validada pelo resolvedor de referências antes da gravação. |
+| A migração aplicada é `20261005_01_fhir_image_intake.py`. | Manter essa revisão imutável. A revisão `20261020_01_traducao_nomenclatura_interna.py`, enquanto ainda não aplicada, pode ser removida e substituída por uma única nova revisão que consolide os nomes internos em pt-BR e as entidades clínicas desta seção. | Nunca remover uma revisão já aplicada. Validar `upgrade` e `downgrade` em PostgreSQL descartável antes da implantação. |
 
-Cada tabela continua a preservar o recurso original em `resource_json`; as
+Cada tabela continua a preservar o recurso original em `recurso_json`; as
 colunas relacionais existem para integridade, consulta e rastreabilidade. Não
 duplicar cada componente de `Observation` em tabelas próprias antes de existir
 um requisito de consulta que justifique essa normalização.
@@ -806,153 +835,154 @@ um requisito de consulta que justifique essa normalização.
 
 ```mermaid
 erDiagram
-    FHIR_BUNDLES ||--o{ BUNDLE_ENTRIES : contains
-    FHIR_BUNDLES ||--|| ANALYSIS_TASKS : initiates
-    FHIR_BUNDLES ||--o{ CLINICAL_OBSERVATIONS : submitted_in
+    PACOTES_FHIR ||--o{ ENTRADAS_PACOTE : contem
+    PACOTES_FHIR ||--|| TAREFAS_ANALISE : inicia
+    PACOTES_FHIR ||--o{ IMAGENS_CLINICAS : contem
+    PACOTES_FHIR ||--o{ OBSERVACOES_CLINICAS : submetidas_em
 
-    FHIR_PATIENTS ||--o{ CLINICAL_ENCOUNTERS : has
-    FHIR_PATIENTS ||--o{ WOUND_CONDITIONS : has
-    FHIR_PATIENTS ||--o{ MEDIA : owns
-    FHIR_PATIENTS ||--o{ CLINICAL_OBSERVATIONS : is_subject_of
+    PACIENTES_FHIR ||--o{ ATENDIMENTOS_CLINICOS : possui
+    PACIENTES_FHIR ||--o{ CONDICOES_FERIDA : possui
+    PACIENTES_FHIR ||--o{ IMAGENS_CLINICAS : possui
+    PACIENTES_FHIR ||--o{ OBSERVACOES_CLINICAS : assunto_de
 
-    CLINICAL_ENCOUNTERS ||--o{ WOUND_CONDITIONS : contextualizes
-    CLINICAL_ENCOUNTERS ||--o{ MEDIA : contextualizes
-    CLINICAL_ENCOUNTERS ||--o{ CLINICAL_OBSERVATIONS : contextualizes
-    CLINICAL_ENCOUNTERS ||--o{ ENCOUNTER_PARTICIPANTS : has
+    ATENDIMENTOS_CLINICOS ||--o{ CONDICOES_FERIDA : contextualiza
+    ATENDIMENTOS_CLINICOS ||--o{ IMAGENS_CLINICAS : contextualiza
+    ATENDIMENTOS_CLINICOS ||--o{ OBSERVACOES_CLINICAS : contextualiza
+    ATENDIMENTOS_CLINICOS ||--o{ PARTICIPANTES_ATENDIMENTO : possui
 
-    PRACTITIONERS ||--o{ ENCOUNTER_PARTICIPANTS : participates_in
-    PRACTITIONERS ||--o{ OBSERVATION_PERFORMERS : performs
-    PRACTITIONERS ||--o{ PROVENANCE_AGENTS : authors
+    PROFISSIONAIS ||--o{ PARTICIPANTES_ATENDIMENTO : participa_de
+    PROFISSIONAIS ||--o{ EXECUTANTES_OBSERVACAO : executa
+    PROFISSIONAIS ||--o{ AGENTES_PROVENIENCIA : autoria
 
-    WOUND_CONDITIONS ||--o{ CLINICAL_OBSERVATIONS : is_focus_of
-    ANALYSIS_DEVICES o|--o{ CLINICAL_OBSERVATIONS : used_by
-    CLINICAL_OBSERVATIONS ||--o{ OBSERVATION_PERFORMERS : has
-    CLINICAL_OBSERVATIONS ||--o{ OBSERVATION_MEDIA : derives_from
-    MEDIA ||--o{ OBSERVATION_MEDIA : contributes_to
+    CONDICOES_FERIDA ||--o{ OBSERVACOES_CLINICAS : foco_de
+    DISPOSITIVOS_ANALISE o|--o{ OBSERVACOES_CLINICAS : utilizado_por
+    OBSERVACOES_CLINICAS ||--o{ EXECUTANTES_OBSERVACAO : possui
+    OBSERVACOES_CLINICAS ||--o{ OBSERVACOES_IMAGENS : deriva_de
+    IMAGENS_CLINICAS ||--o{ OBSERVACOES_IMAGENS : contribui_para
 
-    PROVENANCE_RECORDS ||--o{ PROVENANCE_AGENTS : identifies
-    PROVENANCE_RECORDS ||--o{ PROVENANCE_TARGETS : records
+    REGISTROS_PROVENIENCIA ||--o{ AGENTES_PROVENIENCIA : identifica
+    REGISTROS_PROVENIENCIA ||--o{ ALVOS_PROVENIENCIA : registra
 
-    FHIR_BUNDLES {
+    PACOTES_FHIR {
         string id PK
-        datetime timestamp
-        json resource_json
-        int version_id
-        datetime last_updated
+        datetime data_hora
+        json recurso_json
+        int versao_id
+        datetime atualizado_em
     }
-    BUNDLE_ENTRIES {
+    ENTRADAS_PACOTE {
         int id PK
-        string bundle_id FK
-        int entry_index
-        string full_url
-        string resource_type
-        string resource_id
+        string pacote_id FK
+        int indice_entrada
+        string url_completa
+        string tipo_recurso
+        string recurso_id
     }
-    FHIR_PATIENTS {
+    PACIENTES_FHIR {
         string id PK
-        string identifier_system
-        string identifier_value
-        json resource_json
+        string identificador_sistema
+        string identificador_valor
+        json recurso_json
     }
-    PRACTITIONERS {
+    PROFISSIONAIS {
         string id PK
-        string identifier_system
-        string identifier_value
-        json resource_json
+        string identificador_sistema
+        string identificador_valor
+        json recurso_json
     }
-    CLINICAL_ENCOUNTERS {
+    ATENDIMENTOS_CLINICOS {
         string id PK
-        string patient_id FK
+        string paciente_id FK
         string status
-        string class_system
-        string class_code
-        datetime period_start
-        datetime period_end
-        json resource_json
+        string classe_sistema
+        string classe_codigo
+        datetime periodo_inicio
+        datetime periodo_fim
+        json recurso_json
     }
-    WOUND_CONDITIONS {
+    CONDICOES_FERIDA {
         string id PK
-        string patient_id FK
-        string encounter_id FK
-        string clinical_status
-        string verification_status
-        string code_system
-        string code
-        string body_site_system
-        string body_site_code
-        datetime recorded_date
-        json resource_json
+        string paciente_id FK
+        string atendimento_id FK
+        string status_clinico
+        string status_verificacao
+        string codigo_sistema
+        string codigo
+        string localizacao_sistema
+        string localizacao_codigo
+        datetime data_registro
+        json recurso_json
     }
-    MEDIA {
+    IMAGENS_CLINICAS {
         string id PK
-        string bundle_id FK
-        string patient_id FK
-        string encounter_id FK
-        string content_type
-        text content_data
-        json resource_json
+        string pacote_id FK
+        string paciente_id FK
+        string atendimento_id FK
+        string tipo_conteudo
+        text dados_conteudo
+        json recurso_json
     }
-    ANALYSIS_DEVICES {
+    DISPOSITIVOS_ANALISE {
         string id PK
-        string manufacturer
-        string version
-        json resource_json
+        string fabricante
+        string versao
+        json recurso_json
     }
-    CLINICAL_OBSERVATIONS {
+    OBSERVACOES_CLINICAS {
         string id PK
-        string bundle_id FK
-        string patient_id FK
-        string encounter_id FK
-        string wound_condition_id FK
-        string device_id FK
-        string code_system
-        string code
-        datetime effective_date_time
-        datetime issued
-        json resource_json
+        string pacote_id FK
+        string paciente_id FK
+        string atendimento_id FK
+        string condicao_ferida_id FK
+        string dispositivo_id FK
+        string codigo_sistema
+        string codigo
+        datetime data_hora_efetiva
+        datetime emitido_em
+        json recurso_json
     }
-    OBSERVATION_MEDIA {
-        string observation_id FK
-        string media_id FK
+    OBSERVACOES_IMAGENS {
+        string observacao_id FK
+        string imagem_id FK
     }
-    ENCOUNTER_PARTICIPANTS {
-        string encounter_id FK
-        string practitioner_id FK
+    PARTICIPANTES_ATENDIMENTO {
+        string atendimento_id FK
+        string profissional_id FK
     }
-    OBSERVATION_PERFORMERS {
-        string observation_id FK
-        string practitioner_id FK
+    EXECUTANTES_OBSERVACAO {
+        string observacao_id FK
+        string profissional_id FK
     }
-    ANALYSIS_TASKS {
+    TAREFAS_ANALISE {
         string id PK
-        string bundle_id FK
+        string pacote_id FK
         string status
-        string subject_reference
-        json resource_json
+        string referencia_assunto
+        json recurso_json
     }
-    PROVENANCE_RECORDS {
+    REGISTROS_PROVENIENCIA {
         string id PK
-        datetime recorded
-        string activity_system
-        string activity_code
-        json resource_json
+        datetime registrado_em
+        string atividade_sistema
+        string atividade_codigo
+        json recurso_json
     }
-    PROVENANCE_AGENTS {
-        string provenance_id FK
-        string practitioner_id FK
-        string type_system
-        string type_code
+    AGENTES_PROVENIENCIA {
+        string proveniencia_id FK
+        string profissional_id FK
+        string tipo_sistema
+        string tipo_codigo
     }
-    PROVENANCE_TARGETS {
-        string provenance_id FK
-        string target_resource_type
-        string target_resource_id
-        string target_reference
+    ALVOS_PROVENIENCIA {
+        string proveniencia_id FK
+        string tipo_recurso_alvo
+        string recurso_alvo_id
+        string referencia_alvo
     }
 ```
 
 `Bundle.entry.resource`, `Provenance.target` e `Reference(Any)` são relações
-polimórficas no FHIR. Por isso, `bundle_entries` e `provenance_targets` mantêm
+polimórficas no FHIR. Por isso, `entradas_pacote` e `alvos_proveniencia` mantêm
 tipo e identificador do recurso-alvo, e a existência/tipagem é garantida pelo
 resolvedor de referências da aplicação no mesmo fluxo transacional. As FKs são
 usadas apenas onde o destino é único e conhecido no esquema relacional.
@@ -961,17 +991,17 @@ usadas apenas onde o destino é único e conhecido no esquema relacional.
 
 | Camada atual | Modificação necessária |
 |---|---|
-| `repositories/image.py:create_intake()` cria Bundle, Media e Task e faz `commit()`. | Renomear para `repositories/assessment.py:create_assessment()`. Persistir Patient, Practitioner, Device, Encounter, Condition, Media, Observations, Provenance e Task em uma única unidade de trabalho. |
+| `repositories/imagem.py:create_intake()` cria Bundle, Media e Task e faz `commit()`. | Renomear para `repositories/avaliacao_ferida.py:create_assessment()`. Persistir Patient, Practitioner, Device, Encounter, Condition, Media, Observations, Provenance e Task em uma única unidade de trabalho. |
 | Recursos são serializados sem resolver `urn:uuid`. | Antes de persistir, gerar ou confirmar os IDs, construir o mapa `fullUrl → ResourceType/id` e reescrever referências internas no JSON persistido como referências FHIR canônicas. |
 | Uma falha no meio pode deixar estado parcial se a implementação crescer sem cuidado. | Usar `flush()` para obter integridade de banco e realizar somente um `commit()` após todos os recursos e vínculos serem adicionados. O rollback permanece no serviço e na dependência de sessão. |
-| `services/image.py:submit_media()` trata somente o Bundle de Media. | Renomear para `services/assessment.py:submit_wound_assessment()`. Executar validação semântica antes do repositório, mapear conflito para `409`, banco indisponível para `503` e manter `OperationOutcome` para erro de contrato. |
+| `services/imagem.py:submit_media()` trata somente o Bundle de Media. | Renomear para `services/avaliacao_ferida.py:submit_wound_assessment()`. Executar validação semântica antes do repositório, mapear conflito para `409`, banco indisponível para `503` e manter `OperationOutcome` para erro de contrato. |
 | Existem apenas `read_bundle`, `read_media` e `read_task`. | Adicionar leituras para `Encounter`, `Condition` e `Observation`; expor `Patient` somente quando houver regra de autorização definida. Reutilizar `fhir_conditional_response` para ETag e Last-Modified. |
 
 ### 8.5 Rotas, conformidade e documentação pública
 
 | Arquivo | Modificação necessária |
 |---|---|
-| `api/routes/assessment.py` | Declarar `POST /$avaliar-feridas`, usar `AvaliacaoFeridaParameters` e retornar a `Task` aceita. Criar leituras para `Encounter/{id}`, `Condition/{id}` e `Observation/{id}` com negociação FHIR JSON e respostas condicionais. |
+| `api/routes/avaliacao_ferida.py` | Declarar `POST /$avaliar-feridas`, usar `AvaliacaoFeridaParameters` e retornar a `Task` aceita. Criar leituras para `Encounter/{id}`, `Condition/{id}` e `Observation/{id}` com negociação FHIR JSON e respostas condicionais. |
 | `api/routes/conformance.py` | Substituir `OperationDefinition/submit-media` por `OperationDefinition/avaliar-feridas`; registrar todos os `StructureDefinition` definidos neste documento; atualizar o `CapabilityStatement` com os novos recursos e interações `read`. |
 | `main.py` | Atualizar título, descrição OpenAPI e tags de “intake de imagens” para “avaliação clínica de feridas”. Importar o roteador renomeado. |
 | `README.md` | Atualizar endpoint, headers, recursos obrigatórios, exemplos de payload, leituras disponíveis e instruções de teste. O exemplo desta especificação deve ser a fonte do corpo de requisição. |
@@ -986,22 +1016,120 @@ segurança, não uma autorização implícita para expor os recursos.
 
 | Arquivo | Casos a adicionar ou substituir |
 |---|---|
-| `tests/test_fhir_image_intake.py` → renomear para `tests/test_fhir_wound_assessment.py` | Aceita o payload completo da seção 6 e persiste todos os recursos, referências canônicas, metadados e Task. |
+| `tests/test_fhir_intake_imagem.py` → renomear para `tests/test_fhir_avaliacao_ferida.py` | Aceita o payload completo da seção 6 e persiste todos os recursos, referências canônicas, metadados e Task. |
 | Mesmo arquivo | Rejeita a ausência de cada recurso obrigatório, ResourceType não permitido, `fullUrl` duplicado, paciente divergente, referência `urn:uuid` inexistente, `Observation.focus` fora da ferida, Media sem JPEG, dimensão sem UCUM e percentuais teciduais inconsistentes. |
 | Mesmo arquivo | Rejeita resultado assistivo sem `Device` e captura de qualidade sem `derivedFrom` para `Media`. Confirma que ausência de dor é aceita. |
 | Mesmo arquivo | Confirma `GET` de Bundle, Media, Encounter, Condition e Observation, negociação `Accept`, `ETag`, `Last-Modified` e `304`. |
 | Mesmo arquivo | Confirma `metadata`, a nova `OperationDefinition` e todos os `StructureDefinition` publicados em FHIR R4. |
 
-### 8.7 Sequência de implementação
+### 8.7 Plano de implementação
 
-1. Criar a migração e os modelos relacionais, sem alterar a revisão Alembic
-   existente.
-2. Extrair as primitivas FHIR e implementar schemas/perfis com validação
-   estrutural e entre recursos.
-3. Implementar resolvedor de referências, persistência atômica e serviços.
-4. Substituir rota, definições de conformidade e documentação.
-5. Adicionar os testes de contrato e executar a suíte completa.
+**Andamento atual do plano**
 
-Nenhum passo deve expor uma rota clínica nova antes de os schemas, as
-referências internas, a persistência transacional e os testes de rejeição
-estarem completos.
+- Fase 0: concluída.
+- Fase 1: parcialmente concluída (renomeações e migrações base concluídas;
+  modelagem relacional clínica completa ainda pendente).
+- Fase 2: concluída para validações estruturais e semânticas do contrato.
+- Fase 3: concluída para operação `$avaliar-feridas` e leituras publicadas no
+  `CapabilityStatement`.
+- Fase 4: concluída para suíte automatizada atual e documentação operacional
+  principal.
+
+#### Fase 0 — Preparação e linha de base
+
+1. Preservar o contrato em produção até que a migração clínica esteja completa:
+   a rota `$submit-media` não deve coexistir com a rota clínica quando a
+   substituição for liberada.
+2. Executar a suíte atual e registrar o resultado como linha de base.
+3. Confirmar o estado do banco de cada ambiente. A revisão
+   `20261005_01_fhir_image_intake.py` permanece imutável; a revisão
+   `20261020_01_traducao_nomenclatura_interna.py` só pode ser removida se ainda
+   não tiver sido aplicada.
+
+**Critério de passagem:** banco e revisão Alembic efetivamente aplicada são
+conhecidos, e não há modificação da migração histórica.
+
+#### Fase 1 — Modelo interno e migração consolidada
+
+1. Criar os modelos SQLAlchemy para `pacotes_fhir`, `entradas_pacote`,
+   `pacientes_fhir`, `profissionais`, `atendimentos_clinicos`,
+   `condicoes_ferida`, `imagens_clinicas`, `dispositivos_analise`,
+   `observacoes_clinicas`, `tarefas_analise`, `registros_proveniencia` e suas
+   tabelas de associação, conforme o diagrama da seção 8.3.1.
+2. Renomear os módulos cuja responsabilidade deixa de ser exclusivamente de
+   imagem: `api/routes/imagem.py` para `api/routes/avaliacao_ferida.py`,
+   `schemas/imagem.py` para `schemas/avaliacao_ferida.py`,
+   `repositories/imagem.py` para `repositories/avaliacao_ferida.py` e
+   `services/imagem.py` para `services/avaliacao_ferida.py`. Atualizar todos
+   os imports e testes afetados; o nome representa o agregado clínico completo.
+3. Substituir a revisão Alembic ainda não aplicada por uma nova revisão que:
+   renomeie as tabelas atuais para os nomes internos em pt-BR e crie as
+   entidades clínicas, índices e FKs descritos na seção 8.3.
+4. Manter `recurso_json` como cópia FHIR íntegra e usar colunas relacionais
+   apenas para integridade e consulta.
+5. Validar `upgrade` e `downgrade` contra um PostgreSQL descartável, incluindo
+   dados de um Bundle de imagens preexistente.
+
+**Critério de passagem:** o schema resultante contém todas as FKs, índices e
+restrições de unicidade previstos; a migração preserva os dados existentes.
+
+#### Fase 2 — Schemas FHIR e perfis
+
+1. Extrair as primitivas comuns para `schemas/fhir.py`, preservando aliases
+   FHIR R4 em inglês no JSON e nomes internos em pt-BR.
+2. Implementar em `schemas/avaliacao_ferida.py` os 16 perfis: parâmetros,
+   Bundle, Patient, Practitioner, Device, Encounter, Condition, Media,
+   Provenance e as oito especializações de Observation.
+3. Implementar a união discriminada das entradas permitidas e aceitar somente
+   os tipos de recurso definidos pelo contrato.
+4. Exigir `fullUrl` único e validar cardinalidades, JPEG, UCUM, componentes e
+   terminologia local.
+
+**Critério de passagem:** o payload da seção 6 é aceito pelo schema; cada
+violação de cardinalidade ou tipo gera `OperationOutcome` com expressão FHIR.
+
+#### Fase 3 — Validação semântica e persistência atômica
+
+1. Implementar o resolvedor de referências `urn:uuid`, com índices por
+   `Bundle.entry.fullUrl` e `ResourceType/id`, antes de criar registros no
+   banco.
+2. Validar paciente, atendimento, localização anatômica, foco da ferida,
+   `derivedFrom`, dispositivo assistivo, percentuais de tecido e proveniência.
+3. Implementar `criar_avaliacao_ferida()` no repositório e
+   `submeter_avaliacao_ferida()` no serviço, depois da validação semântica.
+4. Persistir todos os recursos e relacionamentos em uma única unidade de
+   trabalho; realizar um único `commit()` somente após `flush()` bem-sucedido.
+
+**Critério de passagem:** qualquer referência inválida ou erro de persistência
+faz rollback de toda a submissão, sem recursos parciais.
+
+#### Fase 4 — Contrato HTTP e conformidade
+
+1. Registrar o roteador `avaliacao_ferida` e substituir a rota por
+   `POST /api/fhir/r4/$avaliar-feridas`; remover `$submit-media` na mesma
+   entrega.
+2. Atualizar `CapabilityStatement`, `OperationDefinition`, os 16
+   `StructureDefinition`, OpenAPI e README.
+3. Publicar leituras de `Bundle`, `Media`, `Encounter`, `Condition` e
+   `Observation` somente junto das regras de autenticação, autorização e
+   auditoria definidas para dados clínicos.
+
+**Critério de passagem:** os recursos de conformidade anunciam exclusivamente
+o contrato clínico FHIR R4 e não expõem dados sem controle de acesso.
+
+#### Fase 5 — Testes de contrato e implantação
+
+1. Renomear `tests/test_fhir_intake_imagem.py` para
+   `tests/test_fhir_avaliacao_ferida.py` e substituir os testes de intake de
+   imagem pelos cenários da seção 8.6.
+2. Adicionar testes de migração com dados existentes, referências internas,
+   rollback, ETag, `Last-Modified` e negociação de conteúdo.
+3. Executar a suíte completa e uma validação FHIR R4 do payload de exemplo
+   contra os perfis publicados.
+
+**Critério de conclusão:** a nova operação aceita o payload completo, rejeita
+as variações inválidas, persiste a avaliação de forma atômica e é a única rota
+de submissão exposta.
+
+Nenhuma rota clínica deve ser exposta antes da conclusão das fases 1 a 3 e dos
+testes de rejeição da fase 5.

@@ -5,7 +5,7 @@ from enum import Enum
 
 from pydantic import Field
 
-from healplus_intake_image_api.schemas.image import (
+from healplus_intake_image_api.schemas.avaliacao_ferida import (
     CodeableConcept,
     FHIRResource,
     Meta,
@@ -13,7 +13,7 @@ from healplus_intake_image_api.schemas.image import (
 )
 
 HEALPLUS_ANALYSIS_TASK_PROFILE = (
-    "https://healplus.com.br/fhir/StructureDefinition/healplus-analysis-task"
+    "https://healplus.com.br/fhir/StructureDefinition/HealPlusTarefaAnalise"
 )
 
 

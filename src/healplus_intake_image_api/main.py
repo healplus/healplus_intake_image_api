@@ -1,25 +1,25 @@
-"""Aplicação HealPlus para intake de imagens clínicas em FHIR R4."""
+"""Aplicação HealPlus para avaliação clínica de feridas em FHIR R4."""
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 
-from healplus_intake_image_api.api.routes import conformance, image
+from healplus_intake_image_api.api.routes import avaliacao_ferida, conformance
 from healplus_intake_image_api.core.fhir import fhir_error_response, fhir_response
-from healplus_intake_image_api.schemas.image import operation_outcome
-from healplus_intake_image_api.services.image import FHIRRequestError
+from healplus_intake_image_api.schemas.avaliacao_ferida import operation_outcome
+from healplus_intake_image_api.services.avaliacao_ferida import FHIRRequestError
 
 app = FastAPI(
-    title="API HealPlus de Intake de Imagens FHIR R4",
+    title="API HealPlus de Avaliação Clínica de Feridas FHIR R4",
     description=(
-        "API para recebimento assíncrono de fotografias clínicas JPEG por meio "
-        "de recursos FHIR R4. A operação `$submit-media` recebe um `Parameters` "
-        "com um `Bundle` de recursos `Media` e retorna uma `Task` para "
-        "acompanhamento da análise."
+        "API para recebimento assíncrono de avaliações clínicas de feridas por "
+        "meio de recursos FHIR R4. A operação `$avaliar-feridas` recebe um "
+        "`Parameters` com um `Bundle` de recursos clínicos e retorna uma "
+        "`Task` para acompanhamento da análise."
     ),
     version="0.1.0",
     openapi_tags=[
         {
-            "name": "Intake de imagens FHIR R4",
+            "name": "Avaliação clínica de feridas FHIR R4",
             "description": (
                 "Submissão e consulta de Bundles, Media e Tasks da análise."
             ),
@@ -64,7 +64,7 @@ async def handle_validation_error(
         operation_outcome(
             severity="error",
             code="invalid",
-            diagnostics="FHIR request validation failed",
+            diagnostics="Falha na validação da requisição FHIR",
             expression=expressions,
         ),
         status_code=422,
@@ -76,5 +76,5 @@ async def handle_validation_error(
     )
 
 
-app.include_router(image.router)
+app.include_router(avaliacao_ferida.router)
 app.include_router(conformance.router)

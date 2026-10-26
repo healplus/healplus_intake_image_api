@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from healplus_intake_image_api.core.config import settings
 from healplus_intake_image_api.core.database import Base
-from healplus_intake_image_api.models import image  # noqa: F401
+from healplus_intake_image_api.models import avaliacao_ferida  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
