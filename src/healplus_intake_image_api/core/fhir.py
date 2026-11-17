@@ -8,6 +8,7 @@ from fastapi import Header, Request
 from fastapi.responses import JSONResponse, Response
 
 from healplus_intake_image_api.schemas.avaliacao_ferida import operation_outcome
+from healplus_intake_image_api.schemas.fhir import resource_json
 from healplus_intake_image_api.services.avaliacao_ferida import FHIRRequestError
 
 FHIR_JSON_MEDIA_TYPE = "application/fhir+json"
@@ -66,7 +67,7 @@ def fhir_response(
 ) -> FHIRJSONResponse:
     """Retorna conteúdo FHIR JSON serializado."""
     if hasattr(content, "model_dump"):
-        content = content.model_dump(by_alias=True, exclude_none=True, mode="json")
+        content = resource_json(content)
     response_headers = _resource_headers(content) if isinstance(content, dict) else {}
     response_headers.update(headers or {})
     return FHIRJSONResponse(
@@ -122,7 +123,7 @@ def fhir_conditional_response(
 ) -> Response:
     """Retorna um recurso ou 304 quando sua versão não foi alterada."""
     if hasattr(content, "model_dump"):
-        content = content.model_dump(by_alias=True, exclude_none=True, mode="json")
+        content = resource_json(content)
     headers = _resource_headers(content)
     etag = headers.get("ETag")
     if if_none_match and (
@@ -131,10 +132,16 @@ def fhir_conditional_response(
     ):
         return Response(status_code=304, headers=headers)
 
-    if if_modified_since and (last_modified := headers.get("Last-Modified")):
+    if not if_none_match and if_modified_since and (last_modified := headers.get("Last-Modified")):
         try:
             since = parsedate_to_datetime(if_modified_since)
             modified = parsedate_to_datetime(last_modified)
+            if content.get("resourceType") == "Task":
+                # Task pode mudar várias vezes por segundo; a data HTTP perde
+                # essa precisão. Seja conservador para não ocultar conclusão.
+                modified = datetime.fromisoformat(content["meta"]["lastUpdated"].replace("Z", "+00:00"))
+            if since.tzinfo is None:
+                raise ValueError("Data HTTP sem fuso")
         except (TypeError, ValueError):
             pass
         else:
@@ -162,5 +169,6 @@ def fhir_error_response(
             expression=error.expression,
         ),
         status_code=error.status_code,
+        headers={"WWW-Authenticate": "Bearer"} if error.status_code == 401 else None,
         media_type=media_type,
     )

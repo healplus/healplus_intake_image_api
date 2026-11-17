@@ -1,6 +1,10 @@
 """Integration tests for the FHIR R4 wound assessment intake contract."""
 
 import copy
+import base64
+import hashlib
+import io
+from uuid import UUID
 from collections.abc import Generator
 
 import pytest
@@ -8,13 +12,35 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
+from PIL import Image, ImageCms
+from pydantic import SecretStr
 
 from healplus_intake_image_api.core.database import Base, get_db
+from healplus_intake_image_api.core.config import settings
 from healplus_intake_image_api.main import app
 
 
+def jpeg_attachment(*, size: tuple[int, int] = (64, 48), icc: bool = True, exif=None) -> dict:
+    """Gera uma fotografia sintética RGB com tamanho e integridade conferíveis."""
+    image = Image.new("RGB", size, (140, 110, 90))
+    buffer = io.BytesIO()
+    kwargs = {}
+    if icc:
+        kwargs["icc_profile"] = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    if exif is not None:
+        kwargs["exif"] = exif
+    image.save(buffer, format="JPEG", quality=90, **kwargs)
+    data = buffer.getvalue()
+    return {
+        "contentType": "image/jpeg",
+        "data": base64.b64encode(data).decode(),
+        "size": len(data),
+        "hash": base64.b64encode(hashlib.sha1(data).digest()).decode(),
+    }
+
+
 @pytest.fixture
-def client() -> Generator[TestClient]:
+def client(monkeypatch) -> Generator[TestClient]:
     """Create an isolated API client backed by a shared SQLite database."""
     engine = create_engine(
         "sqlite://",
@@ -22,13 +48,17 @@ def client() -> Generator[TestClient]:
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
+    monkeypatch.setattr(settings, "api_client_tokens", {
+        "test-client": SecretStr("a" * 40),
+        "other-client": SecretStr("b" * 40),
+    })
 
     def override_get_db() -> Generator[Session]:
         with Session(engine) as session:
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={"Authorization": "Bearer " + "a" * 40}) as test_client:
         yield test_client
     app.dependency_overrides.clear()
 
@@ -401,7 +431,27 @@ def intake_payload() -> dict:
             return uuid_map.get(value, value)
         return value
 
-    return _replace_urn(payload)
+    payload = _replace_urn(payload)
+    bundle = payload["parameter"][0]["resource"]
+    bundle["identifier"] = {
+        "system": "https://healplus.com.br/fhir/NamingSystem/avaliacao-sintetica",
+        "value": "assessment-001",
+    }
+    media = next(item["resource"] for item in bundle["entry"] if item["resource"]["resourceType"] == "Media")
+    media.update(width=64, height=48, content=jpeg_attachment())
+
+    def version_local_codings(value):
+        if isinstance(value, dict):
+            if str(value.get("system", "")).startswith("https://healplus.com.br/fhir/CodeSystem/"):
+                value["version"] = "1.1.0"
+            for nested in value.values():
+                version_local_codings(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                version_local_codings(nested)
+
+    version_local_codings(payload)
+    return payload
 
 
 def test_submit_wound_assessment_persists_fhir_resources(
@@ -421,7 +471,7 @@ def test_submit_wound_assessment_persists_fhir_resources(
 
     assert response.status_code == 202
     assert response.headers["content-type"].startswith("application/fhir+json")
-    assert response.headers["retry-after"] == "10"
+    assert int(response.headers["retry-after"]) >= 1
     task = response.json()
     assert task["resourceType"] == "Task"
     assert task["status"] == "accepted"
@@ -435,26 +485,26 @@ def test_submit_wound_assessment_persists_fhir_resources(
         f"/api/fhir/r4/{task['focus']['reference']}",
         headers={"Accept": "application/fhir+json"},
     )
-    media_response = client.get(
-        "/api/fhir/r4/Media/media-001",
-        headers={"Accept": "application/fhir+json"},
-    )
-
     assert task_response.json()["status"] == "accepted"
     assert bundle_response.json()["resourceType"] == "Bundle"
-    resources_by_id = {
-        item["resource"]["id"]: item["resource"] for item in bundle_response.json()["entry"]
-    }
+    resources = [item["resource"] for item in bundle_response.json()["entry"]]
+    media = next(resource for resource in resources if resource["resourceType"] == "Media")
+    patient = next(resource for resource in resources if resource["resourceType"] == "Patient")
+    assert UUID(bundle_response.json()["id"])
+    assert all(UUID(resource["id"]) for resource in resources)
+    assert task["for"]["reference"] == f"Patient/{patient['id']}"
+    media_url = f"/api/fhir/r4/Media/{media['id']}"
+    media_response = client.get(media_url, headers={"Accept": "application/fhir+json"})
     assert (
-        "https://healplus.com.br/fhir/StructureDefinition/HealPlusImagemClinica"
-        in resources_by_id["media-001"]["meta"]["profile"]
+        "https://healplus.com.br/fhir/StructureDefinition/HealPlusImagemClinica|1.1.0"
+        in media["meta"]["profile"]
     )
     assert media_response.json()["resourceType"] == "Media"
     assert "etag" in media_response.headers
     assert "last-modified" in media_response.headers
 
     unchanged = client.get(
-        "/api/fhir/r4/Media/media-001",
+        media_url,
         headers={
             "Accept": "application/fhir+json",
             "If-None-Match": media_response.headers["etag"],
@@ -749,16 +799,28 @@ def test_reads_encounter_condition_and_observation_resources(
     )
     assert submit.status_code == 202
 
+    bundle = client.get(f"/api/fhir/r4/{submit.json()['focus']['reference']}").json()
+    resources = [item["resource"] for item in bundle["entry"]]
+    ids = {
+        resource["resourceType"]: resource["id"]
+        for resource in resources
+        if resource["resourceType"] in {"Encounter", "Condition"}
+    }
+    observation_id = next(
+        resource["id"] for resource in resources
+        if resource["resourceType"] == "Observation"
+        and any(coding.get("code") == "dimensoes-ferida" for coding in resource["code"]["coding"])
+    )
     encounter = client.get(
-        "/api/fhir/r4/Encounter/encounter-001",
+        f"/api/fhir/r4/Encounter/{ids['Encounter']}",
         headers={"Accept": "application/fhir+json"},
     )
     condition = client.get(
-        "/api/fhir/r4/Condition/wound-001",
+        f"/api/fhir/r4/Condition/{ids['Condition']}",
         headers={"Accept": "application/fhir+json"},
     )
     observation = client.get(
-        "/api/fhir/r4/Observation/obs-dim",
+        f"/api/fhir/r4/Observation/{observation_id}",
         headers={"Accept": "application/fhir+json"},
     )
 
@@ -768,6 +830,87 @@ def test_reads_encounter_condition_and_observation_resources(
     assert encounter.json()["resourceType"] == "Encounter"
     assert condition.json()["resourceType"] == "Condition"
     assert observation.json()["resourceType"] == "Observation"
+
+
+def test_repeated_submission_returns_original_task(client: TestClient, intake_payload: dict) -> None:
+    """Uma retransmissão após timeout não duplica avaliação, imagem ou Task."""
+    headers = {"Content-Type": "application/fhir+json"}
+    first = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload, headers=headers)
+    replay = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload, headers=headers)
+    assert first.status_code == 202
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+    assert replay.headers["content-location"] == first.headers["content-location"]
+
+
+def test_reused_identifier_with_changed_content_conflicts(client: TestClient, intake_payload: dict) -> None:
+    """A mesma chave idempotente não pode substituir conteúdo já recebido."""
+    headers = {"Content-Type": "application/fhir+json"}
+    first = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload, headers=headers)
+    assert first.status_code == 202
+    intake_payload["parameter"][0]["resource"]["entry"][0]["resource"]["identifier"][0]["value"] = "CHANGED"
+    changed = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload, headers=headers)
+    assert changed.status_code == 409
+    assert changed.json()["resourceType"] == "OperationOutcome"
+
+
+def test_assigns_server_ids_when_all_client_ids_are_omitted(client: TestClient, intake_payload: dict) -> None:
+    """As URNs do Bundle bastam para correlacionar recursos sem IDs locais."""
+    bundle = intake_payload["parameter"][0]["resource"]
+    bundle.pop("id")
+    for entry in bundle["entry"]:
+        entry["resource"].pop("id")
+    headers = {"Content-Type": "application/fhir+json"}
+    first = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload, headers=headers)
+    assert first.status_code == 202
+    assert UUID(first.json()["id"])
+    stored = client.get(f"/api/fhir/r4/{first.json()['focus']['reference']}").json()
+    assert UUID(stored["id"])
+    resources = [entry["resource"] for entry in stored["entry"]]
+    assert all(UUID(resource["id"]) for resource in resources)
+    identities = {f"{resource['resourceType']}/{resource['id']}" for resource in resources}
+
+    def check_references(value):
+        if isinstance(value, dict):
+            if "reference" in value:
+                assert value["reference"] in identities
+            for nested in value.values():
+                check_references(nested)
+        elif isinstance(value, list):
+            assert value, "FHIR não permite arrays vazios serializados"
+            for nested in value:
+                check_references(nested)
+
+    check_references(stored)
+    replay = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+
+
+def test_retains_support_for_client_relative_references(client: TestClient, intake_payload: dict) -> None:
+    """IDs locais informados continuam resolvendo referências ResourceType/id."""
+    bundle = intake_payload["parameter"][0]["resource"]
+    references = {
+        entry["fullUrl"]: f"{entry['resource']['resourceType']}/{entry['resource']['id']}"
+        for entry in bundle["entry"]
+    }
+
+    def use_relative_references(value):
+        if isinstance(value, dict):
+            if value.get("reference") in references:
+                value["reference"] = references[value["reference"]]
+            for nested in value.values():
+                use_relative_references(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                use_relative_references(nested)
+
+    use_relative_references(bundle)
+    response = client.post("/api/fhir/r4/$avaliar-feridas", json=intake_payload,
+                           headers={"Content-Type": "application/fhir+json"})
+    assert response.status_code == 202
+    assert response.json()["for"]["reference"] != "Patient/patient-001"
+    assert UUID(response.json()["for"]["reference"].split("/")[1])
 
 
 def test_internal_persistence_names_are_in_brazilian_portuguese() -> None:

@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 
 from healplus_intake_image_api.api.routes import avaliacao_ferida, conformance
 from healplus_intake_image_api.core.fhir import fhir_error_response, fhir_response
+from healplus_intake_image_api.core.config import settings
 from healplus_intake_image_api.schemas.avaliacao_ferida import operation_outcome
 from healplus_intake_image_api.services.avaliacao_ferida import FHIRRequestError
 
@@ -16,7 +17,7 @@ app = FastAPI(
         "`Parameters` com um `Bundle` de recursos clínicos e retorna uma "
         "`Task` para acompanhamento da análise."
     ),
-    version="0.1.0",
+    version="0.2.0",
     openapi_tags=[
         {
             "name": "Avaliação clínica de feridas FHIR R4",
@@ -32,6 +33,62 @@ app = FastAPI(
         },
     ],
 )
+
+
+class RequestLimitsMiddleware:
+    """Limita o corpo antes do parser JSON, inclusive em envio chunked."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        clinical = scope.get("path", "").startswith("/api/fhir/r4/")
+        request = Request(scope)
+        limit = settings.max_request_bytes
+
+        async def send_private(message):
+            if clinical and message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.extend([(b"cache-control", b"private, no-store"), (b"x-content-type-options", b"nosniff")])
+                message = {**message, "headers": headers}
+            await send(message)
+
+        async def too_large():
+            response = fhir_response(operation_outcome(severity="error", code="too-costly",
+                diagnostics="Corpo da requisição excede o limite permitido", expression=["Parameters"]), status_code=413)
+            await response(scope, receive, send_private)
+
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                declared = int(content_length)
+            except ValueError:
+                declared = limit + 1
+            if declared < 0 or declared > limit:
+                return await too_large()
+        if scope["method"] in {"POST", "PUT", "PATCH"}:
+            body = bytearray()
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    return
+                chunk = message.get("body", b"")
+                if len(body) + len(chunk) > limit:
+                    return await too_large()
+                body.extend(chunk)
+                if not message.get("more_body", False):
+                    break
+            iterator = iter([{"type": "http.request", "body": bytes(body), "more_body": False}])
+
+            async def replay():
+                return next(iterator, {"type": "http.disconnect"})
+            return await self.app(scope, replay, send_private)
+        await self.app(scope, receive, send_private)
+
+
+app.add_middleware(RequestLimitsMiddleware)
 
 
 @app.exception_handler(FHIRRequestError)

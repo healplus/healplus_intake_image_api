@@ -1,9 +1,14 @@
 """Schemas FHIR R4 usados pela API HealPlus de avaliação de feridas."""
 
+import base64
+import io
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
+from PIL import Image
+
+from healplus_intake_image_api.core.image_validation import MAX_IMAGE_DIMENSION
 
 from healplus_intake_image_api.schemas.fhir import (
     Attachment,
@@ -69,20 +74,26 @@ def _is_wound_condition(condition: "ConditionResource") -> bool:
 
 
 class StrictIdentifier(Identifier):
-    system: str
-    value: str
+    system: str = Field(min_length=1, max_length=255)
+    value: str = Field(min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def require_nonblank_values(self) -> "StrictIdentifier":
+        if not self.system.strip() or not self.value.strip():
+            raise ValueError("Identifier.system e value não podem ser vazios")
+        return self
 
 
 class PatientResource(FHIRResource):
     resource_type: Literal["Patient"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     identifier: list[StrictIdentifier] = Field(min_length=1)
 
 
 class PractitionerResource(FHIRResource):
     resource_type: Literal["Practitioner"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     identifier: list[StrictIdentifier] = Field(default_factory=list)
 
 
@@ -91,14 +102,23 @@ class DeviceName(FHIRResource):
     type: str
 
 
+class DeviceVersion(FHIRResource):
+    """Versão repetível e tipada do dispositivo, conforme Device R4."""
+
+    type: CodeableConcept | None = None
+    component: Identifier | None = None
+    value: str = Field(min_length=1)
+
+
 class DeviceResource(FHIRResource):
     resource_type: Literal["Device"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     status: str
     manufacturer: str
     device_name: list[DeviceName] = Field(alias="deviceName", min_length=1)
-    version: str
+    model_number: str | None = Field(default=None, alias="modelNumber")
+    version: list[DeviceVersion] = Field(min_length=1)
 
 
 class EncounterClass(FHIRResource):
@@ -118,7 +138,7 @@ class EncounterParticipant(FHIRResource):
 
 class EncounterResource(FHIRResource):
     resource_type: Literal["Encounter"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     status: str
     class_fhir: EncounterClass = Field(alias="class")
@@ -135,7 +155,7 @@ class EncounterResource(FHIRResource):
 
 class ConditionResource(FHIRResource):
     resource_type: Literal["Condition"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     clinical_status: CodeableConcept = Field(alias="clinicalStatus")
     verification_status: CodeableConcept = Field(alias="verificationStatus")
@@ -163,7 +183,7 @@ class MediaCreate(FHIRResource):
     """Recurso FHIR R4 Media restrito pelo perfil HealPlus."""
 
     resource_type: Literal["Media"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     status: Literal["completed"]
     type: CodeableConcept
@@ -172,6 +192,10 @@ class MediaCreate(FHIRResource):
     created_date_time: datetime = Field(alias="createdDateTime")
     operator: Reference
     body_site: CodeableConcept = Field(alias="bodySite")
+    width: int = Field(ge=1, le=MAX_IMAGE_DIMENSION, strict=True)
+    height: int = Field(ge=1, le=MAX_IMAGE_DIMENSION, strict=True)
+    device: Reference | None = None
+    view: CodeableConcept | None = None
     content: Attachment
 
     @model_validator(mode="after")
@@ -186,6 +210,9 @@ class MediaCreate(FHIRResource):
             raise ValueError(
                 "Media.content.url não é permitido neste perfil de entrada"
             )
+        with Image.open(io.BytesIO(base64.b64decode(self.content.data, validate=True))) as image:
+            if (self.width, self.height) != image.size:
+                raise ValueError("Media.width/height divergem das dimensões do JPEG recebido")
         if not any(
             coding.system == FHIR_MEDIA_TYPE_SYSTEM and coding.code == "image"
             for coding in self.type.coding
@@ -213,7 +240,7 @@ class ObservationComponent(FHIRResource):
 
 class ObservationResource(FHIRResource):
     resource_type: Literal["Observation"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     status: Literal["final", "preliminary"]
     category: list[CodeableConcept] = Field(min_length=1)
@@ -258,8 +285,15 @@ class ObservationResource(FHIRResource):
 
     @property
     def observation_code(self) -> str | None:
-        codes = _coding_codes(self.code)
-        return next(iter(codes), None)
+        """Seleciona a codificação HealPlus, sem depender da ordem de um set."""
+        return next(
+            (
+                coding.code for coding in self.code.coding
+                if coding.system == "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida"
+                and coding.code
+            ),
+            None,
+        )
 
 
 class ProvenanceAgent(FHIRResource):
@@ -275,7 +309,7 @@ class ProvenanceAgent(FHIRResource):
 
 class ProvenanceResource(FHIRResource):
     resource_type: Literal["Provenance"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
     target: list[Reference] = Field(min_length=1)
     recorded: datetime
@@ -324,12 +358,34 @@ class FHIRBundleCreate(FHIRResource):
     """Bundle FHIR collection restrito pelo perfil de avaliação HealPlus."""
 
     resource_type: Literal["Bundle"] = Field(alias="resourceType")
-    id: str = Field(pattern=r"^[A-Za-z0-9\-.]{1,64}$")
+    id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9\-.]{1,64}$")
     meta: Meta | None = None
-    identifier: Identifier | None = None
+    identifier: StrictIdentifier
     type: Literal["collection"]
     timestamp: datetime | None = None
     entry: Annotated[list[BundleEntryCreate], Field(min_length=1)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_extra_terminology_versions(cls, value: Any) -> Any:
+        """Valida também Coding/Meta preservados em elementos FHIR não indexados."""
+        def visit(item: Any) -> None:
+            if isinstance(item, dict):
+                if isinstance(item.get("coding"), list):
+                    for coding in item["coding"]:
+                        if isinstance(coding, dict) and str(coding.get("system", "")).startswith(
+                            "https://healplus.com.br/fhir/CodeSystem/"
+                        ) and not str(coding.get("version") or "").strip():
+                            raise ValueError("Coding.version é obrigatório para CodeSystem HealPlus")
+                if isinstance(item.get("meta"), dict):
+                    Meta.model_validate(item["meta"])
+                for nested in item.values():
+                    visit(nested)
+            elif isinstance(item, list):
+                for nested in item:
+                    visit(nested)
+        visit(value)
+        return value
 
     @model_validator(mode="after")
     def validate_entries(self) -> "FHIRBundleCreate":
@@ -446,9 +502,9 @@ class FHIRBundleCreate(FHIRResource):
                         "Observation.derivedFrom deve referenciar um recurso Media"
                     )
 
-            if code == "qualidade-captura-imagem" and not item.derived_from:
+            if code == "qualidade-captura-imagem" and len(item.derived_from) != 1:
                 raise ValueError(
-                    "Observation qualidade-captura-imagem requer derivedFrom"
+                    "Observation qualidade-captura-imagem requer exatamente um Media em derivedFrom"
                 )
 
         if required_codes_missing:
@@ -476,6 +532,29 @@ class FHIRBundleCreate(FHIRResource):
                 raise ValueError(
                     "Media.encounter deve referenciar o atendimento do Bundle"
                 )
+            if item.device is not None:
+                device_target = _resolve_reference(
+                    item.device.reference,
+                    by_full_url=by_full_url,
+                    by_type_id=by_type_id,
+                )
+                if not isinstance(device_target, DeviceResource):
+                    raise ValueError("Media.device deve referenciar um Device do Bundle")
+            quality_observations = [
+                observation
+                for observation in observations
+                if observation.observation_code == "qualidade-captura-imagem"
+                and any(
+                    _resolve_reference(
+                        source.reference,
+                        by_full_url=by_full_url,
+                        by_type_id=by_type_id,
+                    ) is item
+                    for source in observation.derived_from
+                )
+            ]
+            if len(quality_observations) != 1:
+                raise ValueError("Cada Media requer exatamente uma Observation de qualidade de captura")
 
         condition_patient = _resolve_reference(
             condition.subject.reference,
@@ -536,7 +615,7 @@ class FHIRBundleCreate(FHIRResource):
         for entry in self.entry:
             resource = entry.resource
             if isinstance(resource, PatientResource):
-                return f"Patient/{resource.id}"
+                return f"Patient/{resource.id}" if resource.id else entry.full_url
         raise ValueError("Recurso Patient não encontrado")
 
 

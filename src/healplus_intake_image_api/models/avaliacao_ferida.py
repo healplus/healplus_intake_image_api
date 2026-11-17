@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,8 +20,13 @@ class PacoteFHIR(Base):
     """Bundle FHIR collection persistido e submetido para análise de imagens."""
 
     __tablename__ = "pacotes_fhir"
+    __table_args__ = (
+        UniqueConstraint("cliente_id", "sistema_identificador", "valor_identificador", name="uq_pacote_cliente_identifier"),
+    )
 
     identificador: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cliente_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    conteudo_sha256: Mapped[str | None] = mapped_column(String(64))
     sistema_identificador: Mapped[str | None] = mapped_column(String(255))
     valor_identificador: Mapped[str | None] = mapped_column(String(255))
     instante: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -53,6 +58,10 @@ class EntradaPacote(Base):
     """Representa uma entrada de Bundle persistida de forma estruturada."""
 
     __tablename__ = "entradas_pacote"
+    __table_args__ = (
+        UniqueConstraint("pacote_id", "indice_entrada", name="uq_entradas_pacote_indice"),
+        UniqueConstraint("pacote_id", "url_completa", name="uq_entradas_pacote_url"),
+    )
 
     identificador: Mapped[int] = mapped_column(primary_key=True)
     pacote_id: Mapped[str] = mapped_column(
@@ -131,6 +140,11 @@ class TarefaAnalise(Base):
         unique=True,
     )
     estado: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(255))
     referencia_sujeito: Mapped[str | None] = mapped_column(String(512))
     recurso_json: Mapped[dict] = mapped_column(FHIRJSON, nullable=False)
     id_versao: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -142,3 +156,14 @@ class TarefaAnalise(Base):
         onupdate=utc_now,
     )
     pacote: Mapped[PacoteFHIR] = relationship(back_populates="tarefa")
+
+
+class EventoAuditoria(Base):
+    """Registro interno de AuditEvent sem credenciais ou payload clínico."""
+
+    __tablename__ = "eventos_auditoria"
+
+    identificador: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cliente_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    registrado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    recurso_json: Mapped[dict] = mapped_column(FHIRJSON, nullable=False)

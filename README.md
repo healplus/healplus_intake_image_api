@@ -1,587 +1,223 @@
-# API HealPlus de Avaliação de Feridas FHIR R4
+# API HealPlus de qualidade de imagem e avaliação de feridas FHIR R4
 
-API de intake de avaliação clínica de feridas para análise assíncrona. A
-interface implementa um subconjunto declarado do FHIR R4 com envelope
-`Parameters` e `Bundle` (`collection`) contendo recursos clínicos da avaliação.
+A API recebe avaliações clínicas com fotografias JPEG, valida a integridade das
+imagens e cria uma `Task` para análise técnica assíncrona. Um worker separado
+consome a fila persistida no banco e publica resultados `Observation`, com
+métricas, limiares, motivos de ressalva ou rejeição e orientações em português.
 
-## Operação de intake clínico
+O algoritmo v0 é experimental. Mede nitidez, exposição e resolução; ainda não
+detecta cartão de escala ou cor, não calibra cores, não mede ITA e não valida
+condições clínicas de captura. Esses critérios aparecem como não avaliados.
+Uma imagem sem falhas nos critérios implementados recebe ressalva por causa
+dessas limitações. Os limiares servem à demonstração com dados sintéticos e
+precisam de validação com a equipe clínica antes de orientar atendimento.
+
+## Executar localmente
+
+Requer Python 3.12+, [uv](https://docs.astral.sh/uv/) e PostgreSQL. Os testes usam
+SQLite em memória. No PowerShell:
+
+```powershell
+uv sync --all-groups
+Copy-Item .env.example .env
+```
+
+Preencha `DATABASE_URL`, `POSTGRES_PASSWORD` e `API_CLIENT_TOKENS` no `.env`.
+Gere uma senha e um token próprios; o token deve ter pelo menos 32 caracteres.
+`API_CLIENT_TOKENS` é um objeto JSON que associa cada cliente ao seu segredo:
+
+```dotenv
+API_CLIENT_TOKENS={"cliente-demonstracao":"SUBSTITUA_POR_UM_SEGREDO_ALEATORIO_COM_32_OU_MAIS_CARACTERES"}
+```
+
+Uma forma de gerar cada segredo é `uv run python -c "import secrets;
+print(secrets.token_urlsafe(32))"`. A URL do banco deve usar a mesma senha
+configurada no Compose; caracteres reservados precisam de codificação na URL.
+O PostgreSQL fica publicado apenas em loopback no ambiente de desenvolvimento.
+
+```powershell
+docker compose up -d --wait
+uv run alembic upgrade head
+uv run fastapi dev src/healplus_intake_image_api/main.py
+```
+
+Em outro terminal, com o mesmo `.env`, execute o worker:
+
+```powershell
+uv run python -m healplus_intake_image_api.worker
+# Para consumir no máximo uma tarefa e encerrar:
+uv run python -m healplus_intake_image_api.worker --once
+```
+
+A API fica em `http://127.0.0.1:8000`; o Swagger fica em `/docs`. A submissão
+somente persiste a tarefa: o worker deve estar ativo para a análise terminar.
+A migração deve ser aplicada antes de iniciar qualquer processo da versão nova.
+Faça backup e revise a migração antes de atualizar um banco existente.
+Os pacotes anteriores ficam segregados sob um proprietário reservado
+`__legacy__:<id>`; atribuir seus proprietários exige uma revisão explícita.
+O prefixo reservado não pode ser usado em `API_CLIENT_TOKENS`.
+
+## Autenticação e limites
+
+Toda operação clínica exige `Authorization: Bearer <token>`. Leituras de
+`Patient`, `Practitioner`, `Encounter`, `Condition`, `Media`, `Bundle`,
+`Observation`, `Device`, `Provenance` e `Task` são restritas ao cliente que
+submeteu a avaliação. Um identificador de outro cliente responde `404`.
+Sem credenciais configuradas, a API recusa operações clínicas com `503`.
+Os recursos de conformidade são públicos.
+
+Os tokens são credenciais provisionadas para desenvolvimento e homologação.
+A API não implementa emissão OAuth 2.0 nem SMART Backend Services. Configure
+TLS no proxy/servidor e `REQUIRE_HTTPS=true` na implantação; rotação de tokens,
+rate limiting distribuído e integração com um provedor de identidade continuam
+necessários para produção. Não publique dados reais antes de concluir a
+validação clínica e a avaliação de privacidade do ambiente.
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `DATABASE_URL` | obrigatório | Conexão SQLAlchemy; PostgreSQL em implantação. |
+| `FHIR_BASE_URL` | `http://127.0.0.1:8000/api/fhir/r4` | URL pública da API usada nos `Bundle.entry.fullUrl`; configure a URL real na implantação. |
+| `API_CLIENT_TOKENS` | `{}` | JSON `cliente: segredo`, com segredos únicos de no mínimo 32 caracteres. |
+| `REQUIRE_HTTPS` | `false` | Exige HTTPS nas operações clínicas; HTTP local é destinado ao desenvolvimento. |
+| `MAX_REQUEST_BYTES` | `33554432` | Limite do corpo completo, incluindo Base64; também aplicado a envio em chunks. |
+| `ANALYSIS_TIMEOUT_SECONDS` | `120` | Prazo técnico da Task; não é SLA clínico acordado. |
+| `ANALYSIS_MAX_ATTEMPTS` | `3` | Número máximo de tentativas do worker. |
+| `ANALYSIS_RETRY_BASE_SECONDS` | `2` | Base do recuo exponencial para falhas transitórias. |
+| `ANALYSIS_LEASE_SECONDS` | `60` | Prazo de posse da tarefa antes de recuperação por outro worker. |
+| `WORKER_POLL_SECONDS` | `1.0` | Intervalo do worker quando não há tarefa elegível. |
+
+## Contrato de entrada
 
 ```http
 POST /api/fhir/r4/$avaliar-feridas
+Authorization: Bearer <token>
 Content-Type: application/fhir+json
 Accept: application/fhir+json
 Prefer: respond-async
 ```
 
-O corpo é um recurso FHIR `Parameters` com exatamente um parâmetro `bundle`.
-O recurso desse parâmetro é um `Bundle` do tipo `collection`, contendo os
-recursos clínicos da avaliação:
+Envie `Parameters` com exatamente um parâmetro `bundle`, cujo recurso é um
+`Bundle.type=collection`. O Bundle contém um `Patient`, um `Practitioner`, um
+`Encounter`, uma `Condition` de ferida, um `Provenance`, pelo menos um `Media`
+e as observações clínicas obrigatórias: `dimensoes-ferida`, `tecido-ferida`,
+`sinais-infeccao-ferida`, `exsudato-ferida`, `bordas-ferida`, `pele-perilesional`
+e `qualidade-captura-imagem`. Cada fotografia exige sua própria observação
+humana de qualidade em `derivedFrom`. Dispositivos podem ser incluídos e
+referenciados por `Media.device`.
 
-- 1 `Patient`
-- 1 `Practitioner`
-- 1 `Encounter`
-- 1 `Condition` da ferida avaliada
-- 1 `Provenance`
-- >= 1 `Media`
-- `Observation` com códigos obrigatórios:
-  `dimensoes-ferida`, `tecido-ferida`, `sinais-infeccao-ferida`,
-  `exsudato-ferida`, `bordas-ferida`, `pele-perilesional`,
-  `qualidade-captura-imagem`
+`Bundle.identifier.system` e `.value` são obrigatórios. Reenvie exatamente o
+mesmo conteúdo com o mesmo identificador após uma falha de rede:
 
-```json
-{
-  "resourceType": "Parameters",
-  "parameter": [
-    {
-      "name": "bundle",
-      "resource": {
-        "resourceType": "Bundle",
-        "id": "assessment-001",
-        "type": "collection",
-        "entry": [
-          {
-            "fullUrl": "urn:uuid:10000000-0000-1000-8000-000000000001",
-            "resource": {
-              "resourceType": "Patient",
-              "id": "patient-001",
-              "identifier": [
-                {
-                  "system": "https://healplus.com.br/fhir/NamingSystem/paciente",
-                  "value": "PSEUD-00001"
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:20000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Practitioner",
-              "id": "practitioner-001",
-              "identifier": [
-                {
-                  "system": "https://healplus.com.br/fhir/NamingSystem/profissional",
-                  "value": "PROF-00001"
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:30000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Encounter",
-              "id": "encounter-001",
-              "status": "finished",
-              "class": {
-                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
-                "code": "AMB"
-              },
-              "subject": {
-                "reference": "urn:uuid:10000000-0000-1000-8000-000000000001"
-              },
-              "period": {
-                "start": "2026-10-19T21:50:00Z"
-              },
-              "participant": [
-                {
-                  "individual": {
-                    "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-                  }
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:40000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Condition",
-              "id": "wound-001",
-              "clinicalStatus": {
-                "coding": [
-                  {
-                    "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
-                    "code": "active"
-                  }
-                ]
-              },
-              "verificationStatus": {
-                "coding": [
-                  {
-                    "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
-                    "code": "confirmed"
-                  }
-                ]
-              },
-              "category": [
-                {
-                  "coding": [
-                    {
-                      "system": "https://healplus.com.br/fhir/CodeSystem/categoria-condicao",
-                      "code": "ferida"
-                    }
-                  ]
-                }
-              ],
-              "code": {
-                "coding": [
-                  {
-                    "system": "https://healplus.com.br/fhir/CodeSystem/tipo-ferida",
-                    "code": "ulcera-venosa"
-                  }
-                ]
-              },
-              "subject": {
-                "reference": "urn:uuid:10000000-0000-1000-8000-000000000001"
-              },
-              "encounter": {
-                "reference": "urn:uuid:30000000-0000-4000-8000-000000000001"
-              },
-              "recordedDate": "2026-10-19T22:00:00Z",
-              "recorder": {
-                "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-              },
-              "bodySite": [
-                {
-                  "coding": [
-                    {
-                      "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica",
-                      "code": "maleolo-medial-esquerdo"
-                    }
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:50000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Media",
-              "id": "media-001",
-              "status": "completed",
-              "type": {
-                "coding": [
-                  {
-                    "system": "http://terminology.hl7.org/CodeSystem/media-type",
-                    "code": "image"
-                  }
-                ]
-              },
-              "subject": {
-                "reference": "urn:uuid:10000000-0000-1000-8000-000000000001"
-              },
-              "encounter": {
-                "reference": "urn:uuid:30000000-0000-4000-8000-000000000001"
-              },
-              "createdDateTime": "2026-10-19T21:55:00Z",
-              "operator": {
-                "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-              },
-              "bodySite": {
-                "coding": [
-                  {
-                    "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica",
-                    "code": "maleolo-medial-esquerdo"
-                  }
-                ]
-              },
-              "content": {
-                "contentType": "image/jpeg",
-                "data": "/9j/4AAQ"
-              }
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-dimensoes",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "dimensoes-ferida"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]},
-              "derivedFrom": [{"reference": "urn:uuid:50000000-0000-4000-8000-000000000001"}]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000002",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-tecido",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "tecido-ferida"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]}
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000003",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-infeccao",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "sinais-infeccao-ferida"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]}
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000004",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-exsudato",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "exsudato-ferida"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]}
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000005",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-bordas",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "bordas-ferida"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]}
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000006",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-pele",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "pele-perilesional"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]}
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000007",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-qualidade",
-              "status": "final",
-              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-              "code": {"coding": [{"system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "qualidade-captura-imagem"}]},
-              "subject": {"reference": "urn:uuid:10000000-0000-1000-8000-000000000001"},
-              "encounter": {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-              "focus": [{"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"}],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{"reference": "urn:uuid:20000000-0000-4000-8000-000000000001"}],
-              "bodySite": {"coding": [{"code": "maleolo-medial-esquerdo"}]},
-              "derivedFrom": [{"reference": "urn:uuid:50000000-0000-4000-8000-000000000001"}]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Provenance",
-              "id": "provenance-001",
-              "target": [
-                {"reference": "urn:uuid:30000000-0000-4000-8000-000000000001"},
-                {"reference": "urn:uuid:40000000-0000-4000-8000-000000000001"},
-                {"reference": "urn:uuid:50000000-0000-4000-8000-000000000001"},
-                {"reference": "urn:uuid:60000000-0000-4000-8000-000000000001"}
-              ],
-              "recorded": "2026-10-19T22:10:00Z",
-              "activity": {
-                "coding": [
-                  {
-                    "code": "captura-dados-clinicos"
-                  }
-                ]
-              },
-              "agent": [
-                {
-                  "type": {
-                    "coding": [
-                      {
-                        "code": "author"
-                      }
-                    ]
-                  },
-                  "who": {
-                    "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      }
-    }
-  ]
-}
+- Primeira submissão: `202`, nova Task e `Content-Location`.
+- Mesmo cliente, identificador e conteúdo: `200`, mesma Task, sem duplicação.
+- Mesmo cliente e identificador, conteúdo divergente: `409 OperationOutcome`.
+
+O servidor atribui UUIDs ao Bundle e a cada recurso; IDs locais são opcionais e
+não são chaves globais. Use as referências retornadas pelo servidor nas
+consultas. As referências internas são reescritas para os IDs persistidos e os
+`fullUrl` usam a base REST configurada, permitindo resolução dentro do Bundle.
+Essa regra segue a [resolução de referências no FHIR R4](https://hl7.org/fhir/R4/bundle.html#references).
+
+Cada `Media` requer `width`, `height`, `content.size` e `content.hash`. O hash
+é SHA-1 dos bytes JPEG, codificado em Base64, conforme `Attachment.hash` do
+FHIR R4; não é uma assinatura digital. Dimensões, tamanho e hash são conferidos
+contra os bytes recebidos. Os pixels devem estar na orientação final, com
+EXIF de orientação ausente ou igual a 1, perfil ICC sRGB RGB válido e sem GPS,
+nome do proprietário ou número de série no EXIF. A imagem precisa ser um JPEG
+completo e decodificável; a extensão e o `Content-Type` não substituem essa
+verificação. Limites por imagem: 10 MiB, 8192 pixels por lado e 24 milhões de
+pixels. O limite do corpo inclui todas as fotos e a expansão Base64.
+
+Codificações `https://healplus.com.br/fhir/CodeSystem/*` precisam de
+`Coding.version`. Perfis HealPlus declarados em `meta.profile` precisam da
+versão canônica, por exemplo `.../HealPlusImagemClinica|1.1.0`.
+`Device.version` usa uma lista de objetos `type`/`value` do FHIR R4.
+Capture sem recomprimir sucessivamente a fotografia; o servidor não consegue
+provar quantas recompressões ocorreram antes do envio.
+
+## Exemplo reproduzível com dados sintéticos
+
+O gerador cria o contexto clínico sintético, marca os recursos com `HTEST` e
+produz um JPEG sRGB real com tamanho, hash e dimensões corretos. A imagem é um
+padrão geométrico, sem fotografia de paciente; não é material para validação
+clínica nem para treino de segmentação.
+
+```powershell
+uv run python examples/build_payload.py --output synthetic-payload.json
+$env:HEALPLUS_TOKEN = '<token configurado no .env>'
+curl.exe -X POST 'http://127.0.0.1:8000/api/fhir/r4/$avaliar-feridas' -H "Authorization: Bearer $env:HEALPLUS_TOKEN" -H 'Content-Type: application/fhir+json' -H 'Accept: application/fhir+json' --data-binary '@synthetic-payload.json'
 ```
 
-O payload contém dados pseudonimizados e uma imagem JPEG Base64 mínima para
-fins de exemplo. Substitua-os por dados clinicamente válidos e por uma imagem
-JPEG codificada em Base64 antes do uso em produção.
+Guarde e reenvie o mesmo arquivo para testar idempotência. Uma nova execução do
+gerador cria novos instantes, referências e identificador de negócio.
+O exemplo antigo com `data=/9j/4AAQ` foi removido: aqueles bytes não formam
+uma fotografia JPEG e agora são rejeitados.
 
-Uma submissão aceita retorna `202 Accepted`, o header
-`Content-Location: /api/fhir/r4/Task/{id}` e um recurso FHIR `Task` com
-`status = accepted`. O header `Prefer: respond-async` é opcional; quando
-informado, deve conter o valor `respond-async`.
+## Consulta da Task e resultados
 
-No Swagger UI (`/docs`), o corpo da operação é publicado como
-`application/fhir+json`, portanto o `Content-Type` é definido automaticamente.
-O header `Prefer` também está disponível como campo opcional. Use
-`Accept: application/fhir+json` para receber uma resposta FHIR JSON; a API
-também aceita `application/json`.
+Consulte a URL de `Content-Location` com o mesmo token. Estados do worker:
+`accepted` → `in-progress` → `completed` ou `failed`. A rejeição técnica da
+fotografia termina em `completed`; o veredito fica em `Task.businessStatus`.
+`failed` significa falha da execução, com `statusReason` codificado.
 
-## Estados da análise
+`Task.input` identifica as fotografias. `Task.output.valueReference` aponta
+para cada `Observation` de resultado. O resultado tem `focus=Media`,
+`status=preliminary`, métricas e respectivos `component.referenceRange`,
+critérios não calculados com `dataAbsentReason`, motivos e orientações de
+recaptura. Um `Device` registrado pelo servidor identifica o algoritmo e suas
+versões. O `Provenance` vincula resultado, origem e protocolo. Não há pesos de
+rede neural neste algoritmo; o hash identifica o artefato efetivamente usado.
 
-O estado da análise é sempre o código nativo de `Task.status`: `draft`,
-`requested`, `received`, `accepted`, `rejected`, `ready`, `cancelled`,
-`in-progress`, `on-hold`, `failed`, `completed` ou `entered-in-error`.
+As leituras suportam `ETag`, `Last-Modified`, `If-None-Match`,
+`If-Modified-Since` e `304`. Respeite `Retry-After` enquanto a análise estiver
+pendente. O worker usa tentativas limitadas, recuo exponencial e prazo da Task
+em `restriction.period`; tarefas interrompidas podem ser retomadas após a lease.
+Submissões e leituras clínicas produzem `AuditEvent` interno, sem cópia da
+imagem nem dos tokens no registro de auditoria.
 
-## Recursos disponíveis
+O corpo JPEG é persistido uma única vez no armazenamento de imagens. Os JSONs
+persistidos de Bundle e entradas não repetem Base64; as respostas FHIR de
+leitura são reconstruídas com os bytes da imagem.
 
-- `GET /api/fhir/r4/Task/{id}`
-- `GET /api/fhir/r4/Bundle/{id}`
-- `GET /api/fhir/r4/Media/{id}`
-- `GET /api/fhir/r4/Encounter/{id}`
-- `GET /api/fhir/r4/Condition/{id}`
-- `GET /api/fhir/r4/Observation/{id}`
-- `GET /api/fhir/r4/metadata`
-- `GET /api/fhir/r4/OperationDefinition/avaliar-feridas`
-- `GET /api/fhir/r4/StructureDefinition/{profile-id}`
+## Conformidade e documentação
 
-Os perfis publicados incluem:
-`HealPlusAvaliacaoFerida`, `HealPlusPaciente`, `HealPlusProfissional`,
-`HealPlusDispositivoAnalise`, `HealPlusAtendimentoAvaliacaoFerida`,
-`HealPlusFerida`, `HealPlusImagemClinica`, `HealPlusProvenienciaAvaliacao`,
-`HealPlusDimensoesFerida`, `HealPlusTecidoFerida`,
-`HealPlusSinaisInfeccaoFerida`, `HealPlusExsudatoFerida`,
-`HealPlusDorFerida`, `HealPlusBordasFerida`,
-`HealPlusPelePerilesional`, `HealPlusQualidadeCapturaImagem` e
-`HealPlusTarefaAnalise`.
+- `GET /api/fhir/r4/metadata`: capacidades e versão `0.2.0` do software.
+- `GET /api/fhir/r4/OperationDefinition/avaliar-feridas`: contrato da operação.
+- `GET /api/fhir/r4/StructureDefinition/{id}`: perfis clínicos e de resultado,
+  versão `1.1.0`.
+- `GET /api/fhir/r4/CodeSystem/{id}` e `ValueSet/{id}`: terminologia técnica
+  experimental, com definições dos códigos e bindings da saída.
 
-Falhas nas rotas FHIR são retornadas como recursos `OperationOutcome` com o
-media type negociado `application/fhir+json` ou `application/json`. Recursos
-recuperados incluem `ETag` e `Last-Modified`; clientes podem usar
-`If-None-Match` ou `If-Modified-Since` para leitura condicional.
+O [mapeamento clínico](FHIR_CLINICAL_REQUIREMENTS_MAPPING.md) descreve as
+relações FHIR. O [registro das 42 lacunas](docs/implementation-gaps.md) separa
+as correções implementadas, parciais e pendentes. Não há exportação para
+pesquisa, consentimento secundário, conjunto rotulado, adjudicação ou detecção
+de cartão de referência nesta versão. Os perfis publicados são diferenciais;
+a suíte não substitui validação com o validador oficial HL7 nem validação
+clínica externa.
 
-## Especificações FHIR R4 implementadas
+O [guia da implementação e operação](docs/quality-pipeline.md) detalha a
+arquitetura, os cálculos, o ciclo da fila, a auditoria e a atualização do banco.
+O [histórico da versão 0.2.0](CHANGELOG.md) reúne as mudanças e os ajustes
+exigidos dos clientes. Os comandos e resultados efetivamente executados estão
+no [registro de validação](docs/validation-2026-11-17.md).
 
-| Especificação | Implementação no HealPlus |
-|---|---|
-| [RESTful API e formatos](https://hl7.org/fhir/R4/http.html) | Base `/api/fhir/r4`, JSON FHIR, negociação por `Accept`, `Content-Type: application/fhir+json`, versionamento HTTP e leitura condicional. |
-| [Operações FHIR](https://hl7.org/fhir/R4/operations.html) | Operação de sistema `POST /api/fhir/r4/$avaliar-feridas`, documentada por `OperationDefinition`, com entrada `Parameters` e retorno `Task`. |
-| [Padrão assíncrono](https://hl7.org/fhir/R4/async.html) | `Prefer: respond-async` opcional, resposta `202 Accepted`, `Content-Location` e `Retry-After` para consulta posterior da análise. |
-| [Bundle](https://hl7.org/fhir/R4/bundle.html) | Recebimento de `Bundle.type = collection` com recursos clínicos tipados, validação de `fullUrl` único e preservação do recurso original. |
-| [Media](https://hl7.org/fhir/R4/media.html) | Imagens clínicas JPEG em `Attachment.data` Base64, `subject`, `encounter`, data de criação, tipo de mídia e metadados clínicos aplicáveis. |
-| [Task](https://hl7.org/fhir/R4/task.html) | Acompanhamento assíncrono da análise com os códigos nativos de `Task.status`, `focus` para o Bundle e `for` para o paciente. |
-| [OperationOutcome](https://hl7.org/fhir/R4/operationoutcome.html) | Erros de validação, conteúdo, conflito, recurso inexistente e indisponibilidade retornados como recursos FHIR estruturados. |
-| [CapabilityStatement](https://hl7.org/fhir/R4/capabilitystatement.html) | Publicação das capacidades do servidor em `GET /api/fhir/r4/metadata`. |
-| [Profiles e StructureDefinition](https://hl7.org/fhir/R4/profiling.html) | Perfis HealPlus publicados para `Bundle`, `Patient`, `Practitioner`, `Device`, `Encounter`, `Condition`, `Media`, `Observation`, `Provenance` e `Task`, expostos em `StructureDefinition`. |
+## Testes
 
-As referências acima correspondem à versão **FHIR R4 4.0.1**. Os perfis
-HealPlus restringem o padrão base ao cenário de intake de fotografias clínicas;
-eles não substituem perfis nacionais ou de outras organizações.
-
-## Modelo entidade-relacionamento
-
-```mermaid
-erDiagram
-    pacotes_fhir ||--o{ entradas_pacote : contem
-    pacotes_fhir ||--o{ imagens_clinicas : contem
-    pacotes_fhir ||--|| tarefas_analise : inicia
-    imagens_clinicas ||--o{ codificacoes_tipo_imagem : classifica
-
-    pacotes_fhir {
-        varchar identificador PK "FHIR Bundle.id"
-        varchar sistema_identificador
-        varchar valor_identificador
-        timestamptz instante
-        jsonb recurso_json "FHIR Bundle completo"
-        integer id_versao
-        timestamptz atualizado_em
-    }
-    entradas_pacote {
-        integer identificador PK
-        varchar pacote_id FK
-        integer indice_entrada
-        varchar url_completa
-        varchar tipo_recurso
-        varchar recurso_id
-        jsonb recurso_json "entry.resource completo"
-    }
-
-    imagens_clinicas {
-        varchar identificador PK "FHIR Media.id"
-        varchar pacote_id FK
-        varchar url_completa
-        varchar estado
-        varchar referencia_sujeito
-        varchar referencia_atendimento
-        timestamptz criado_em
-        varchar tipo_conteudo
-        text conteudo
-        jsonb recurso_json "FHIR Media completo"
-        integer id_versao
-        timestamptz atualizado_em
-    }
-
-    codificacoes_tipo_imagem {
-        integer identificador PK
-        varchar imagem_id FK
-        varchar sistema
-        varchar codigo
-        varchar exibicao
-    }
-
-    tarefas_analise {
-        varchar identificador PK "FHIR Task.id"
-        varchar pacote_id FK "UNIQUE"
-        varchar estado "FHIR Task.status"
-        varchar referencia_sujeito
-        jsonb recurso_json "FHIR Task completo"
-        integer id_versao
-        timestamptz criado_em
-        timestamptz atualizado_em
-    }
-```
-
-Cada `Bundle` submetido inicia exatamente uma `Task` de análise (restrição
-`UNIQUE` em `tarefas_analise.pacote_id`), armazena uma ou mais `Media` e
-preserva todas as entradas em `entradas_pacote` para rastreabilidade clínica.
-Os documentos FHIR originais são preservados nas colunas `recurso_json`,
-enquanto as colunas relacionais suportam consulta e integridade.
-
-## Status atual da implementação
-
-- Contrato clínico FHIR ativo em `POST /api/fhir/r4/$avaliar-feridas`, com
-  validação estrutural e semântica do Bundle clínico.
-- OpenAPI e Swagger UI publicam o corpo da operação como
-  `application/fhir+json`; `Prefer` é um header opcional e, quando enviado,
-  precisa incluir `respond-async`.
-- Persistência implementada para `Bundle`, `Media`, `Task` e armazenamento
-  estruturado de entradas do Bundle em `entradas_pacote`.
-- Conformance publicada em `metadata`, `OperationDefinition` e
-  `StructureDefinition` dos perfis HealPlus do escopo clínico.
-- Suíte automatizada atual: `13` testes de integração passando (`pytest -q`).
-- A modelagem relacional clínica completa descrita no
-  `FHIR_CLINICAL_REQUIREMENTS_MAPPING.md` (tabelas dedicadas para paciente,
-  profissional, atendimento, condição, observações e proveniência) permanece
-  como evolução incremental.
-
-## Desenvolvimento
-
-### Pré-requisitos
-
-- Python 3.12 ou superior;
-- [uv](https://docs.astral.sh/uv/);
-- Docker com Docker Compose v2.
-
-### Inicialização local
-
-Use o fluxo abaixo para preparar o ambiente local. `docker compose up -d --wait`
-é a forma recomendada de iniciar o PostgreSQL: ele sobe o serviço em segundo
-plano e aguarda o `healthcheck` concluir antes de continuar.
-
-```bash
-# Instala as dependências da aplicação e de desenvolvimento.
-uv sync --all-groups
-
-# Cria o arquivo local de configuração do banco.
-cp .env.example .env
-
-# Inicia o PostgreSQL 16 e espera o banco ficar saudável.
-docker compose up -d --wait
-
-# Cria/atualiza o esquema FHIR no banco.
-uv run alembic upgrade head
-
-# Inicia a API em modo de desenvolvimento.
-uv run fastapi dev src/healplus_intake_image_api/main.py
-```
-
-A API estará disponível em `http://127.0.0.1:8000`, e a documentação OpenAPI
-em `http://127.0.0.1:8000/docs`.
-
-O Compose expõe o PostgreSQL em `localhost:5432` com o banco `healplus`, usuário
-`healplus` e senha de desenvolvimento `healplus_dev`. A `DATABASE_URL` padrão
-em `.env.example` já corresponde a esses valores.
-
-### Comandos usuais
-
-```bash
-# Ver os containers e acompanhar os logs do banco.
-docker compose ps
-docker compose logs -f postgres
-
-# Conferir a versão de migração aplicada.
-uv run alembic current
-
-# Executar os testes.
+```powershell
 uv run pytest -q
-
-# Parar o banco, preservando os dados no volume Docker.
-docker compose down
 ```
 
-### Testes
+A suíte cobre o contrato FHIR, imagens reais geradas em memória, falhas de
+integridade e privacidade, idempotência, isolamento de clientes, limites,
+auditoria, ciclo da Task e falhas do worker. Os testes usam banco SQLite
+isolado. Para validar migrações, restauração de dados legados, ausência de
+divergência de schema e concorrência no PostgreSQL 16, execute também:
 
-Os testes automatizados usam SQLite em memória e não exigem que o PostgreSQL ou
-o Docker Compose estejam em execução.
-
-```bash
-# Executa toda a suíte.
-uv sync --all-groups
-uv run pytest -q
-
-# Executa somente os testes do intake FHIR.
-uv run pytest -q tests/test_fhir_avaliacao_ferida.py
-
-# Executa um único cenário.
-uv run pytest -q \
-  tests/test_fhir_avaliacao_ferida.py::test_submit_wound_assessment_persists_fhir_resources
+```powershell
+uv run python scripts/verify_postgres.py
 ```
 
-Para reiniciar o banco local do zero, remova explicitamente o volume e repita a
-inicialização:
-
-```bash
-docker compose down -v
-docker compose up -d --wait
-uv run alembic upgrade head
-```
+Esse comando exige Docker ativo, cria um banco descartável separado e remove
+somente o container criado e verificado pelo próprio script. Ele não usa o
+Compose nem o banco configurado no `.env`.

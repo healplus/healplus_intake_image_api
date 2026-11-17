@@ -47,3 +47,10 @@ class TaskResponse(FHIRResource):
     authored_on: datetime = Field(alias="authoredOn")
     last_modified: datetime = Field(alias="lastModified")
     status_reason: CodeableConcept | None = Field(default=None, alias="statusReason")
+    code: CodeableConcept | None = None
+    business_status: CodeableConcept | None = Field(default=None, alias="businessStatus")
+    input: list[dict] | None = None
+    output: list[dict] | None = None
+    execution_period: dict | None = Field(default=None, alias="executionPeriod")
+    restriction: dict | None = None
+    part_of: list[Reference] | None = Field(default=None, alias="partOf")

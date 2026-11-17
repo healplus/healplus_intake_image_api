@@ -4,31 +4,28 @@
 **Escopo:** contrato de intake de avaliações clínicas de feridas da API HealPlus.  
 **Versão normativa:** FHIR R4 4.0.1.
 
-## Status atual de implementação (2026-10-21)
+## Status atual de implementação em 16 de novembro de 2026
 
-### Implementado na branch atual
+A versão 0.2.0 mantém o intake clínico e adiciona a análise técnica experimental
+assíncrona. Os perfis publicados têm versão 1.1.0. Este documento distingue o
+contrato implementado das propostas de evolução: a seção 8 mantém o desenho
+alvo da modelagem clínica, sem significar que todas as tabelas propostas existem.
+O estado de cada lacuna do relatório está em
+[docs/implementation-gaps.md](docs/implementation-gaps.md).
 
-- Operação de sistema `POST /api/fhir/r4/$avaliar-feridas` com `Parameters`
-  contendo `Bundle.type = collection`.
-- Schemas clínicos em `schemas/avaliacao_ferida.py` com validação estrutural e
-  semântica das referências internas do Bundle.
-- Persistência transacional de `Bundle`, `Media` e `Task`, além da tabela
-  `entradas_pacote` para rastreabilidade de todas as entradas do Bundle.
-- Leituras FHIR para `Task`, `Bundle`, `Media`, `Encounter`, `Condition` e
-  `Observation`.
-- Publicação de `CapabilityStatement`, `OperationDefinition` e perfis
-  `StructureDefinition` do escopo clínico HealPlus.
-- Suíte automatizada atual com `13` testes passando em `pytest -q`.
+Foram implementados validação de JPEG real com ICC sRGB, dimensões/tamanho/hash
+conferidos, proteção de EXIF sensível, idempotência por cliente e identificador
+de negócio, UUIDs do servidor, armazenamento único do Base64, autorização por
+cliente, auditoria e worker com tentativas limitadas e prazo. A saída usa
+Observation, Device, Provenance e Task.input/output/businessStatus. Os limiares
+são experimentais e versionados; escala, cor calibrada, ângulo, reflexo e
+adequação clínica do enquadramento não são medidos pelo algoritmo v0.
 
-### Pendências em relação ao estado-alvo desta especificação
-
-- A modelagem relacional clínica completa da seção 8.3 (tabelas dedicadas para
-  `Patient`, `Practitioner`, `Encounter`, `Condition`, `Observation`,
-  `Provenance` e associações) ainda não foi materializada; neste momento os
-  recursos não-`Media` são preservados e consultados por `entradas_pacote`.
-- O requisito de política de autenticação/autorização/auditoria para exposição
-  de dados clínicos sensíveis permanece como pré-requisito de hardening para
-  evolução do escopo de leitura.
+Os recursos clínicos não-Media e resultados são preservados em JSON estruturado
+em entradas_pacote; a modelagem clínica relacional completa da seção 8.3 ainda
+é uma proposta. A autenticação atual usa tokens Bearer provisionados; OAuth 2.0,
+SMART, consentimento secundário, governança e validação clínica continuam
+pendentes. As instruções executáveis estão no [README](README.md).
 
 ## 1. Decisões de interoperabilidade
 
@@ -80,7 +77,7 @@ A associação entre fotografia e ferida é garantida por:
 
 1. `Media.subject` e `Media.encounter` iguais aos da avaliação;
 2. `Media.bodySite` compatível com `Condition.bodySite`; e
-3. `Observation.focus` referenciando a ferida e `Observation.derivedFrom`
+3. `Observation.focus` das observações clínicas de entrada referenciando a ferida e `Observation.derivedFrom`
    referenciando a fotografia utilizada.
 
 Referências entre entradas do Bundle usam `urn:uuid:<uuid RFC 4122>` em
@@ -88,6 +85,12 @@ Referências entre entradas do Bundle usam `urn:uuid:<uuid RFC 4122>` em
 `bdl-7`.
 
 ## 3. Matriz de rastreabilidade do Quadro 1
+
+A matriz descreve a semântica e os requisitos clínicos pretendidos. A API
+verifica a estrutura e parte das relações entre recursos; ela ainda não exige
+todos os componentes clínicos abaixo, não valida a soma dos percentuais de
+tecido e não confirma a compatibilidade anatômica por terminologia. Esses
+requisitos não devem ser interpretados como validação clínica automática.
 
 | ID | Informação clínica | Recurso FHIR R4 | Regra HealPlus |
 |---|---|---|---|
@@ -143,11 +146,12 @@ pt-BR e `language = "pt-BR"`.
 | `.parameter.name` | `code` | 1..1 | Fixo em `bundle`. |
 | `.parameter.resource` | `Resource` | 1..1 | Deve ser `Bundle` no perfil `HealPlusAvaliacaoFerida`. Não pode coexistir com `value[x]` ou `part`. |
 | `HealPlusAvaliacaoFerida.resourceType` | `code` | 1..1 | Fixo em `Bundle`. |
-| `.id` | `id` | 1..1 | Identificador FHIR do pacote submetido. |
+| `.id` | `id` | 0..1 na entrada | Identificador local opcional; o servidor atribui um novo UUID na persistência. |
+| `.identifier` | `Identifier` | 1..1 | `system/value` não vazios, até 255 caracteres cada; chave de idempotência por cliente. |
 | `.type` | `code` | 1..1 | Fixo em `collection`. |
-| `.timestamp` | `instant` | 1..1 | Momento de montagem do Bundle. |
+| `.timestamp` | `instant` | 0..1 | Momento de montagem do Bundle, quando informado. |
 | `.entry` | `BackboneElement` | 1..* | Contém todos os recursos da avaliação. |
-| `.entry.fullUrl` | `uri` | 1..1 | `urn:uuid:<uuid>` único no Bundle. |
+| `.entry.fullUrl` | `uri` | 1..1 | Na entrada, `urn:uuid:<uuid>` único; na resposta persistida, URL REST completa configurada por `FHIR_BASE_URL`. |
 | `.entry.resource` | `Resource` | 1..1 | Recurso permitido pela seção 5. `entry.request` e `entry.response` são proibidos em `collection`. |
 
 ### 4.2 Contexto clínico e rastreabilidade
@@ -184,12 +188,15 @@ pt-BR e `language = "pt-BR"`.
 | `.content` | `Attachment` | 1..1 | Conteúdo da fotografia. |
 | `.content.contentType` | `code` | 1..1 | Fixo em `image/jpeg`. |
 | `.content.data` | `base64Binary` | 1..1 | JPEG em Base64. A API não aceita URL externa neste perfil. |
-| `.content.hash` | `base64Binary` | 0..1 | Hash da imagem quando disponibilizado pelo cliente. |
+| `.content.hash` | `base64Binary` | 1..1 | SHA-1 em Base64, obrigatório e conferido contra os bytes JPEG. |
+| `.content.size` | `unsignedInt` | 1..1 | Tamanho em bytes, obrigatório e conferido. |
+| `.width` e `.height` | `positiveInt` | 1..1 | Dimensões conferidas contra o JPEG; até 8192 por lado e 24 milhões de pixels. |
+| `.device` | `Reference(Device)` | 0..1 | Quando presente, deve resolver para Device de captura do próprio Bundle. |
 | `HealPlusDispositivoAnalise.status` | `code` | 1..1 | Estado do dispositivo; `active` para modelo disponível. |
 | `.manufacturer` | `string` | 1..1 | Responsável pelo dispositivo ou modelo. |
 | `.deviceName.name` | `string` | 1..1 | Nome do dispositivo ou modelo. |
-| `.deviceName.type` | `code` | 1..1 | Fixo em `user-friendly-name`. |
-| `.version` | `string` | 1..1 | Versão reprodutível do modelo ou dispositivo. |
+| `.deviceName.type` | `code` | 1..1 | Tipo do nome do dispositivo, por exemplo `model-name` ou `user-friendly-name`; a entrada não fixa um único valor. |
+| `.version` | `BackboneElement[]` | 1..* | Lista de versões FHIR R4 com type e value; o algoritmo de qualidade é registrado pelo servidor. |
 | `HealPlusProvenienciaAvaliacao.target` | `Reference(Any)` | 1..* | Recursos de entrada produzidos na mesma atividade. |
 | `.recorded` | `instant` | 1..1 | Momento em que a atividade foi registrada. |
 | `.activity` | `CodeableConcept` | 1..1 | Atividade local versionada `captura-dados-clinicos`. |
@@ -243,7 +250,18 @@ validado pela equipe clínica antes da implementação.
 | `HealPlusPelePerilesional` | `pele-perilesional` | Componentes `eritema`, `edema`, `maceracao`, `ressecamento`, `descamacao` e `irritacao`: `boolean`; `distancia-afetada`: `Quantity` em `cm`. |
 | `HealPlusQualidadeCapturaImagem` | `qualidade-captura-imagem` | Componentes `foco`, `iluminacao`, `enquadramento`, `distancia-padronizada` e `repetivel`: `CodeableConcept`; `escala-presente` e `privacidade-revisada`: `boolean`. `derivedFrom` é obrigatório e referencia um `Media`. |
 
-## 5. Validações entre recursos
+## 5. Validações e regras entre recursos
+
+A implementação atual exige as cardinalidades dos recursos de contexto e os
+sete códigos clínicos obrigatórios, rejeita `fullUrl` e identidades locais
+duplicadas e resolve as referências usadas para paciente, atendimento,
+primeiro foco clínico, fontes `derivedFrom`, participantes do Encounter e alvos
+do Provenance. Cada Media deve possuir uma observação humana de qualidade
+individual. O contrato técnico da fotografia é verificado contra seus bytes.
+
+A lista a seguir também conserva obrigações clínicas do desenho original;
+ela inclui regras sem validação automática completa. O guia de
+[implementação e operação](docs/quality-pipeline.md) descreve os limites atuais.
 
 1. O Bundle deve conter exatamente um `Patient`, um `Practitioner`, um
    `Encounter`, uma `Condition` no perfil `HealPlusFerida` e um `Provenance`;
@@ -254,9 +272,10 @@ validado pela equipe clínica antes da implementação.
    dor.
 2. Captura remota sem `Encounter` está fora do escopo deste contrato e requer
    perfil e regras de proveniência próprios em uma especificação futura.
-3. Todo `Observation.subject` deve referenciar o Patient; todo
-   `Observation.focus` deve referenciar a Condition; todo
+3. Nas observações clínicas de entrada, `Observation.subject` deve referenciar
+   o Patient e `Observation.focus` deve referenciar a Condition; todo
    `Observation.encounter`, quando presente, deve referenciar o mesmo Encounter.
+   Os resultados técnicos criados pelo servidor têm `focus=Media`.
 4. A data da fotografia (`Media.createdDateTime`) e a data clínica
    (`Observation.effectiveDateTime`) são independentes e ambas devem ser
    preservadas.
@@ -267,508 +286,33 @@ validado pela equipe clínica antes da implementação.
 7. Resultados assistivos não podem inferir dor, diagnosticar infecção, definir
    conduta, prescrever tratamento ou estagiar automaticamente a lesão.
 
+Nesta versão não há validador clínico completo para localizações anatômicas,
+percentuais de tecido ou conteúdo de todos os componentes. Nem todas as
+referências adicionais preservadas no JSON são resolvidas pelo schema; por
+exemplo, o primeiro `focus` clínico é conferido, mas isso não equivale a validar
+semanticamente todos os focos adicionais. A aceitação do intake atesta o
+subconjunto estrutural implementado, e não a veracidade clínica do registro.
+
 ## 6. Payload completo de exemplo
 
-O payload abaixo representa uma avaliação presencial. Ele contém todos os
-requisitos RC01a–RC12a e inclui RC09a (dor), embora seja opcional. Os códigos
-HealPlus são ilustrativos e precisam ser formalizados nos `ValueSet` e
-`CodeSystem` publicados.
+Use o gerador [examples/build_payload.py](examples/build_payload.py):
 
-```json
-{
-  "resourceType": "Parameters",
-  "meta": {
-    "profile": [
-      "https://healplus.com.br/fhir/StructureDefinition/HealPlusParametrosAvaliacaoFerida"
-    ]
-  },
-  "parameter": [
-    {
-      "name": "bundle",
-      "resource": {
-        "resourceType": "Bundle",
-        "id": "assessment-20261019-001",
-        "meta": {
-          "profile": [
-            "https://healplus.com.br/fhir/StructureDefinition/HealPlusAvaliacaoFerida"
-          ]
-        },
-        "type": "collection",
-        "timestamp": "2026-10-19T22:10:00Z",
-        "entry": [
-          {
-            "fullUrl": "urn:uuid:10000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Patient",
-              "id": "patient-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusPaciente"
-                ]
-              },
-              "identifier": [
-                {
-                  "system": "https://healplus.com.br/fhir/NamingSystem/paciente",
-                  "value": "PSEUD-00001"
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:20000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Practitioner",
-              "id": "practitioner-001",
-              "identifier": [
-                {
-                  "system": "https://healplus.com.br/fhir/NamingSystem/profissional",
-                  "value": "PROF-00001"
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:30000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Device",
-              "id": "device-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusDispositivoAnalise"
-                ]
-              },
-              "status": "active",
-              "manufacturer": "HealPlus",
-              "deviceName": [
-                {
-                  "name": "Segmentação de tecido HealPlus",
-                  "type": "user-friendly-name"
-                }
-              ],
-              "version": "1.0.0"
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:40000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Encounter",
-              "id": "encounter-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusAtendimentoAvaliacaoFerida"
-                ]
-              },
-              "status": "finished",
-              "class": {
-                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
-                "code": "AMB",
-                "display": "Ambulatorial"
-              },
-              "subject": {
-                "reference": "urn:uuid:10000000-0000-4000-8000-000000000001"
-              },
-              "period": {
-                "start": "2026-10-19T21:50:00Z",
-                "end": "2026-10-19T22:10:00Z"
-              },
-              "participant": [
-                {
-                  "individual": {
-                    "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-                  }
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:50000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Condition",
-              "id": "wound-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusFerida"
-                ]
-              },
-              "clinicalStatus": {
-                "coding": [
-                  {
-                    "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
-                    "code": "active"
-                  }
-                ]
-              },
-              "verificationStatus": {
-                "coding": [
-                  {
-                    "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
-                    "code": "confirmed"
-                  }
-                ]
-              },
-              "category": [
-                {
-                  "coding": [
-                    {
-                      "system": "https://healplus.com.br/fhir/CodeSystem/categoria-condicao",
-                      "code": "ferida"
-                    }
-                  ]
-                }
-              ],
-              "code": {
-                "coding": [
-                  {
-                    "system": "https://healplus.com.br/fhir/CodeSystem/tipo-ferida",
-                    "code": "ulcera-venosa",
-                    "display": "Úlcera venosa"
-                  }
-                ]
-              },
-              "subject": {
-                "reference": "urn:uuid:10000000-0000-4000-8000-000000000001"
-              },
-              "encounter": {
-                "reference": "urn:uuid:40000000-0000-4000-8000-000000000001"
-              },
-              "onsetDateTime": "2026-08-01",
-              "recordedDate": "2026-10-19T22:00:00Z",
-              "recorder": {
-                "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-              },
-              "bodySite": [
-                {
-                  "coding": [
-                    {
-                      "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica",
-                      "code": "maleolo-medial-esquerdo",
-                      "display": "Maléolo medial esquerdo"
-                    }
-                  ]
-                }
-              ],
-              "note": [
-                {
-                  "authorReference": {
-                    "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-                  },
-                  "time": "2026-10-19T22:00:00Z",
-                  "text": "Recorrência relatada; sem alteração de conduta neste intake."
-                }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:60000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Media",
-              "id": "media-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusImagemClinica"
-                ]
-              },
-              "status": "completed",
-              "type": {
-                "coding": [
-                  {
-                    "system": "http://terminology.hl7.org/CodeSystem/media-type",
-                    "code": "image"
-                  }
-                ]
-              },
-              "subject": {
-                "reference": "urn:uuid:10000000-0000-4000-8000-000000000001"
-              },
-              "encounter": {
-                "reference": "urn:uuid:40000000-0000-4000-8000-000000000001"
-              },
-              "createdDateTime": "2026-10-19T21:55:00Z",
-              "operator": {
-                "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-              },
-              "bodySite": {
-                "coding": [
-                  {
-                    "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica",
-                    "code": "maleolo-medial-esquerdo"
-                  }
-                ]
-              },
-              "content": {
-                "contentType": "image/jpeg",
-                "data": "/9j/4AAQ"
-              }
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-dimensions-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusDimensoesFerida"
-                ]
-              },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "dimensoes-ferida" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "method": { "text": "Medição manual com régua métrica" },
-              "derivedFrom": [{ "reference": "urn:uuid:60000000-0000-4000-8000-000000000001" }],
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "comprimento" }] }, "valueQuantity": { "value": 4.2, "unit": "cm", "system": "http://unitsofmeasure.org", "code": "cm" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "largura" }] }, "valueQuantity": { "value": 2.1, "unit": "cm", "system": "http://unitsofmeasure.org", "code": "cm" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "profundidade" }] }, "valueQuantity": { "value": 0.3, "unit": "cm", "system": "http://unitsofmeasure.org", "code": "cm" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "area" }] }, "valueQuantity": { "value": 8.82, "unit": "cm2", "system": "http://unitsofmeasure.org", "code": "cm2" } }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000002",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-tissue-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusTecidoFerida"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "tecido-ferida" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "method": { "text": "Segmentação assistiva por imagem" },
-              "device": { "reference": "urn:uuid:30000000-0000-4000-8000-000000000001" },
-              "derivedFrom": [{ "reference": "urn:uuid:60000000-0000-4000-8000-000000000001" }],
-              "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/tecido-ferida", "code": "granulacao" }] },
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "percentual-granulacao" }] }, "valueQuantity": { "value": 65, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "percentual-necrose" }] }, "valueQuantity": { "value": 0, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "percentual-esfacelo" }] }, "valueQuantity": { "value": 20, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "percentual-epitelizacao" }] }, "valueQuantity": { "value": 10, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%" } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "percentual-nao-classificado" }] }, "valueQuantity": { "value": 5, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%" } }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000003",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-infection-signs-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusSinaisInfeccaoFerida"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "sinais-infeccao-ferida" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "odor" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "eritema" }] }, "valueBoolean": true },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "calor" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "dor-aumentada" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "secrecao" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "piora-visual" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "edema" }] }, "valueBoolean": true }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000004",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-exudate-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusExsudatoFerida"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "exsudato-ferida" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "presente" }] }, "valueBoolean": true },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "quantidade" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "pequena" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "aspecto" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "seroso" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "cor" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "amarelo-palha" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "consistencia" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "fluido" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "odor-avaliado" }] }, "valueBoolean": true }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000005",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-pain-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusDorFerida"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "dor-ferida" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "method": { "text": "Escala numérica de 0 a 10" },
-              "valueInteger": 3,
-              "note": [{ "text": "Dor relatada pela paciente." }]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000006",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-edges-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusBordasFerida"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "bordas-ferida" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "maceracao" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "descolamento" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "epitelizacao" }] }, "valueBoolean": true },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "hiperqueratose" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "irregularidade" }] }, "valueBoolean": false }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000007",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-periwound-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusPelePerilesional"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "pele-perilesional" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T22:00:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "eritema" }] }, "valueBoolean": true },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "edema" }] }, "valueBoolean": true },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "maceracao" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "ressecamento" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "descamacao" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "irritacao" }] }, "valueBoolean": false },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "distancia-afetada" }] }, "valueQuantity": { "value": 0.5, "unit": "cm", "system": "http://unitsofmeasure.org", "code": "cm" } }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:70000000-0000-4000-8000-000000000008",
-            "resource": {
-              "resourceType": "Observation",
-              "id": "obs-capture-quality-001",
-              "meta": { "profile": ["https://healplus.com.br/fhir/StructureDefinition/HealPlusQualidadeCapturaImagem"] },
-              "status": "final",
-              "category": [{ "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam" }] }],
-              "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "qualidade-captura-imagem" }] },
-              "subject": { "reference": "urn:uuid:10000000-0000-4000-8000-000000000001" },
-              "encounter": { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-              "focus": [{ "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" }],
-              "effectiveDateTime": "2026-10-19T21:55:00Z",
-              "issued": "2026-10-19T22:10:00Z",
-              "performer": [{ "reference": "urn:uuid:20000000-0000-4000-8000-000000000001" }],
-              "bodySite": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/localizacao-anatomica", "code": "maleolo-medial-esquerdo" }] },
-              "derivedFrom": [{ "reference": "urn:uuid:60000000-0000-4000-8000-000000000001" }],
-              "component": [
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "foco" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "adequado" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "iluminacao" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "adequado" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "enquadramento" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "ferida-e-pele-perilesional-completas" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "distancia-padronizada" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "sim" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "escala-presente" }] }, "valueBoolean": true },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "repetivel" }] }, "valueCodeableConcept": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "sim" }] } },
-                { "code": { "coding": [{ "system": "https://healplus.com.br/fhir/CodeSystem/avaliacao-ferida", "code": "privacidade-revisada" }] }, "valueBoolean": true }
-              ]
-            }
-          },
-          {
-            "fullUrl": "urn:uuid:80000000-0000-4000-8000-000000000001",
-            "resource": {
-              "resourceType": "Provenance",
-              "id": "provenance-001",
-              "meta": {
-                "profile": [
-                  "https://healplus.com.br/fhir/StructureDefinition/HealPlusProvenienciaAvaliacao"
-                ]
-              },
-              "target": [
-                { "reference": "urn:uuid:40000000-0000-4000-8000-000000000001" },
-                { "reference": "urn:uuid:50000000-0000-4000-8000-000000000001" },
-                { "reference": "urn:uuid:60000000-0000-4000-8000-000000000001" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000001" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000002" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000003" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000004" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000005" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000006" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000007" },
-                { "reference": "urn:uuid:70000000-0000-4000-8000-000000000008" }
-              ],
-              "recorded": "2026-10-19T22:10:00Z",
-              "activity": {
-                "coding": [
-                  {
-                    "system": "https://healplus.com.br/fhir/CodeSystem/atividade-proveniencia",
-                    "code": "captura-dados-clinicos"
-                  }
-                ]
-              },
-              "agent": [
-                {
-                  "type": {
-                    "coding": [
-                      {
-                        "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
-                        "code": "author"
-                      }
-                    ]
-                  },
-                  "who": {
-                    "reference": "urn:uuid:20000000-0000-4000-8000-000000000001"
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      }
-    }
-  ]
-}
+```powershell
+uv run python examples/build_payload.py --output synthetic-payload.json
 ```
+
+O arquivo gerado contém o Parameters completo, Bundle.identifier, referências
+UUID internas, codificações locais versionadas, meta.profile canônico versionado
+e marca HTEST. A fotografia é um padrão geométrico sintético gerado em memória,
+com JPEG decodificável, ICC sRGB, Media.width/height e Attachment.size/hash SHA-1
+corretos. Não contém imagem de paciente nem representa uma avaliação clínica.
+O valor truncado /9j/4AAQ do exemplo anterior foi removido porque não é um JPEG
+válido. Reenvios idempotentes devem reutilizar o mesmo arquivo, sem gerar novos
+instantes, referências ou bytes.
+
+As identidades locais enviadas servem à resolução de referências na requisição;
+o servidor atribui UUIDs de persistência e reescreve as referências retornadas.
+Consulte os recursos pelos identificadores devolvidos pelo servidor.
 
 ## 7. Impacto no contrato legado
 
@@ -782,7 +326,13 @@ ainda deve ser concluída para atingir integralmente o modelo-alvo descrito na
 seção 8.3. Não é seguro codificar os requisitos RC01a–RC12a como extensões ad
 hoc em `Media`: eles têm semântica clínica própria em FHIR R4.
 
-## 8. Mapeamento das modificações necessárias na API
+## 8. Desenho alvo da evolução clínica
+
+As tabelas e fases desta seção são o plano de evolução original. Elas não são
+um inventário de funcionalidades disponíveis. Para a implementação atual da
+qualidade de imagem e respectivas limitações, consulte o README e o registro
+das 42 lacunas. Não execute exclusões ou reconstruções de banco a partir de
+propostas históricas desta seção.
 
 Esta seção converte a especificação em alterações concretas no código atual.
 Ela é um mapa de implementação; não altera o contrato em produção por si só.

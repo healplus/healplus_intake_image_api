@@ -15,6 +15,16 @@ from healplus_intake_image_api.schemas.task import HEALPLUS_ANALYSIS_TASK_PROFIL
 from healplus_intake_image_api.services.avaliacao_ferida import FHIRRequestError
 
 FHIR_BASE_PATH = "/api/fhir/r4"
+PROFILE_VERSION = "1.1.0"
+SOFTWARE_VERSION = "0.2.0"
+CANONICAL_BASE = "https://healplus.com.br/fhir"
+
+
+def _versioned(url: str) -> str:
+    """Versiona referências canônicas sem alterar a identidade da definição."""
+    return f"{url.split('|', 1)[0]}|{PROFILE_VERSION}"
+
+
 HEALPLUS_PATIENT_PROFILE = (
     "https://healplus.com.br/fhir/StructureDefinition/HealPlusPaciente"
 )
@@ -63,11 +73,12 @@ def _definicao_estrutura(
     return {
         "resourceType": "StructureDefinition",
         "id": resource_id,
-        "url": url,
+        "url": url.split("|", 1)[0],
+        "version": PROFILE_VERSION,
         "name": name,
         "title": title,
         "status": "active",
-        "date": "2026-10-05",
+        "date": "2026-11-16",
         "publisher": "HealPlus",
         "description": description,
         "language": "pt-BR",
@@ -79,7 +90,9 @@ def _definicao_estrutura(
             f"http://hl7.org/fhir/StructureDefinition/{resource_type}"
         ),
         "derivation": "constraint",
-        "differential": {"element": elements},
+        "differential": {
+            "element": [{"id": resource_type, "path": resource_type}, *elements]
+        },
     }
 
 
@@ -178,6 +191,13 @@ PROFILES = {
                 "fixedCode": "image/jpeg",
             },
             {"id": "Media.content.data", "path": "Media.content.data", "min": 1},
+            {"id": "Media.content.size", "path": "Media.content.size", "min": 1},
+            {
+                "id": "Media.content.hash", "path": "Media.content.hash", "min": 1,
+                "short": "SHA-1 dos bytes JPEG em Base64, conferido pelo servidor",
+            },
+            {"id": "Media.width", "path": "Media.width", "min": 1},
+            {"id": "Media.height", "path": "Media.height", "min": 1},
         ],
     ),
     "HealPlusAvaliacaoFerida": _definicao_estrutura(
@@ -199,6 +219,9 @@ PROFILES = {
             },
             {"id": "Bundle.entry", "path": "Bundle.entry", "min": 1},
             {"id": "Bundle.entry.resource", "path": "Bundle.entry.resource", "min": 1},
+            {"id": "Bundle.identifier", "path": "Bundle.identifier", "min": 1},
+            {"id": "Bundle.identifier.system", "path": "Bundle.identifier.system", "min": 1},
+            {"id": "Bundle.identifier.value", "path": "Bundle.identifier.value", "min": 1},
         ],
     ),
     "HealPlusTarefaAnalise": _definicao_estrutura(
@@ -220,6 +243,23 @@ PROFILES = {
                 "fixedCode": "order",
             },
             {"id": "Task.focus", "path": "Task.focus", "min": 1},
+            {"id": "Task.code", "path": "Task.code", "min": 1},
+            {"id": "Task.input", "path": "Task.input", "min": 1},
+            {
+                "id": "Task.input.value[x]", "path": "Task.input.value[x]",
+                "type": [{"code": "Reference", "targetProfile": [
+                    _versioned(HEALPLUS_MEDIA_PROFILE)
+                ]}],
+            },
+            {
+                "id": "Task.output.value[x]", "path": "Task.output.value[x]",
+                "type": [{"code": "Reference", "targetProfile": [
+                    f"{CANONICAL_BASE}/StructureDefinition/HealPlusResultadoQualidadeImagem|{PROFILE_VERSION}"
+                ]}],
+            },
+            {"id": "Task.businessStatus", "path": "Task.businessStatus"},
+            {"id": "Task.executionPeriod", "path": "Task.executionPeriod"},
+            {"id": "Task.restriction.period", "path": "Task.restriction.period", "min": 1},
         ],
     ),
     "HealPlusProvenienciaAvaliacao": _definicao_estrutura(
@@ -251,14 +291,159 @@ for profile_name, profile_url in HEALPLUS_OBSERVATION_PROFILES.items():
         ],
     )
 
+QUALITY_PROFILE = f"{CANONICAL_BASE}/StructureDefinition/HealPlusResultadoQualidadeImagem"
+QUALITY_DEVICE_PROFILE = f"{CANONICAL_BASE}/StructureDefinition/HealPlusModeloQualidadeImagem"
+QUALITY_PROVENANCE_PROFILE = f"{CANONICAL_BASE}/StructureDefinition/HealPlusProvenienciaAnaliseQualidade"
+
+# Vocabulários técnicos do algoritmo demonstrativo. Estes códigos não descrevem
+# tecido, diagnóstico, dor ou conduta clínica.
+TERMINOLOGY: dict[str, dict[str, str]] = {
+    "veredito-qualidade-imagem": {
+        "aceita": "Todos os critérios técnicos implementados foram satisfeitos.",
+        "aceita-com-ressalva": "A imagem requer revisão, inclusive por critérios não avaliados.",
+        "rejeitada": "Ao menos um critério técnico eliminatório implementado falhou.",
+    },
+    "criterio-qualidade-imagem": {
+        "escore-global": "Escore técnico demonstrativo entre zero e um; não é probabilidade clínica.",
+        "nitidez": "Variância do Laplaciano na imagem de luminância processada.",
+        "exposicao-media": "Média da luminância dos pixels processados.",
+        "pixels-subexpostos": "Fração de pixels no limiar inferior de luminância.",
+        "pixels-saturados": "Fração de pixels no limiar superior de luminância.",
+        "resolucao-menor-dimensao": "Menor dimensão da imagem original em pixels.",
+        "integridade-arquivo": "O arquivo foi decodificado e os metadados declarados conferidos.",
+        "referencia-escala-detectada": "Presença de referência física; não calculada pelo algoritmo v0.",
+        "referencia-cor-detectada": "Presença de cartão de cor; não calculada pelo algoritmo v0.",
+        "desvio-cor-delta-e": "Desvio de cor calibrado; não calculado pelo algoritmo v0.",
+        "resolucao-espacial": "Pixels por unidade física; não calculado pelo algoritmo v0.",
+        "angulo-captura": "Ângulo em relação à superfície; não calculado pelo algoritmo v0.",
+        "reflexo": "Reflexo especular; não calculado pelo algoritmo v0.",
+        "enquadramento": "Enquadramento clínico; não calculado pelo algoritmo v0.",
+        "ita-pele-perilesional": "ITA perilesional; não coletado nem calculado pelo algoritmo v0.",
+        "motivo-rejeicao": "Motivo técnico de rejeição ou ressalva.",
+        "orientacao-recaptura": "Orientação técnica em português para nova captura ou revisão.",
+    },
+    "motivo-rejeicao-imagem": {
+        "desfocada": "Nitidez inferior ao limiar demonstrativo.",
+        "baixa-resolucao": "Menor dimensão em pixels inferior ao limiar demonstrativo.",
+        "subexposta": "Luminância abaixo do limiar ou fração de pixels escuros excessiva.",
+        "superexposta": "Luminância acima do limiar ou fração de pixels saturados excessiva.",
+        "criterios-nao-avaliados": "O algoritmo v0 não avaliou todos os critérios clínicos de captura.",
+    },
+    "orientacao-recaptura": {
+        "estabilizar-e-focar": "Estabilize o aparelho e ajuste o foco antes de fotografar novamente.",
+        "aumentar-resolucao": "Use uma captura de maior resolução, sem ampliar artificialmente os pixels.",
+        "ajustar-iluminacao": "Ajuste a iluminação e evite áreas excessivamente claras ou escuras.",
+        "revisar-criterios-nao-avaliados": "Revise manualmente escala, cor, reflexos, ângulo e enquadramento.",
+    },
+    "tarefa-analise": {
+        "imagem-avaliada": "Media submetida à análise técnica.",
+        "resultado-qualidade-imagem": "Observation gerada pela análise técnica da imagem.",
+        "analise-qualidade-imagem": "Executar a análise técnica das imagens da submissão.",
+    },
+    "motivo-falha-analise": {
+        "tempo-esgotado": "O prazo máximo da Task foi ultrapassado.",
+        "limite-tentativas": "O número máximo de tentativas técnicas foi atingido.",
+        "falha-tecnica": "Falha técnica recuperável ou inesperada na execução.",
+        "imagem-invalida": "O conteúdo persistido não pôde ser processado como imagem válida.",
+    },
+    "atividade-proveniencia": {
+        "analise-qualidade-imagem": "Execução do algoritmo técnico de qualidade sobre a imagem de origem.",
+        "captura-dados-clinicos": "Registro do conjunto de dados clínicos submetido pelo cliente.",
+    },
+    "avaliacao-ferida": {
+        "resultado-qualidade-imagem": "Resultado técnico assistivo da fotografia.",
+        "analise-automatizada-qualidade-imagem": "Método automático experimental de avaliação técnica.",
+    },
+}
+
+CODE_SYSTEMS = {
+    name: {
+        "resourceType": "CodeSystem", "id": name,
+        "url": f"{CANONICAL_BASE}/CodeSystem/{name}",
+        "version": PROFILE_VERSION, "name": "HealPlus" + "".join(p.title() for p in name.split("-")),
+        "status": "draft", "experimental": True, "date": "2026-11-16",
+        "publisher": "HealPlus", "caseSensitive": True, "content": "complete",
+        "count": len(codes),
+        "concept": [{"code": code, "display": code, "definition": definition}
+                    for code, definition in codes.items()],
+    }
+    for name, codes in TERMINOLOGY.items()
+}
+# O sistema de avaliação clínica contém outros códigos fora deste catálogo.
+CODE_SYSTEMS["avaliacao-ferida"]["content"] = "fragment"
+VALUE_SETS = {
+    name: {
+        "resourceType": "ValueSet", "id": name,
+        "url": f"{CANONICAL_BASE}/ValueSet/{name}",
+        "version": PROFILE_VERSION, "name": CODE_SYSTEMS[name]["name"],
+        "status": "draft", "experimental": True,
+        "compose": {"include": [{
+            "system": f"{CANONICAL_BASE}/CodeSystem/{name}",
+            "version": PROFILE_VERSION,
+            "concept": [{"code": code} for code in codes],
+        }]},
+    }
+    for name, codes in TERMINOLOGY.items()
+}
+
+PROFILES["HealPlusResultadoQualidadeImagem"] = _definicao_estrutura(
+    url=QUALITY_PROFILE, resource_id="HealPlusResultadoQualidadeImagem",
+    name="HealPlusResultadoQualidadeImagem", title="Resultado técnico de qualidade de imagem",
+    description=("Resultado experimental assistivo da fotografia. Critérios não implementados "
+                 "usam dataAbsentReason; não avalia ferida, dor, diagnóstico ou conduta."),
+    resource_type="Observation", elements=[
+        {"id": "Observation.status", "path": "Observation.status", "fixedCode": "preliminary"},
+        {"id": "Observation.category", "path": "Observation.category", "min": 1},
+        {"id": "Observation.subject", "path": "Observation.subject", "min": 1},
+        {"id": "Observation.encounter", "path": "Observation.encounter", "min": 1},
+        {"id": "Observation.focus", "path": "Observation.focus", "min": 1, "max": "1",
+         "type": [{"code": "Reference", "targetProfile": [_versioned(HEALPLUS_MEDIA_PROFILE)]}]},
+        {"id": "Observation.derivedFrom", "path": "Observation.derivedFrom", "min": 1},
+        {"id": "Observation.device", "path": "Observation.device", "min": 1,
+         "type": [{"code": "Reference", "targetProfile": [_versioned(QUALITY_DEVICE_PROFILE)]}]},
+        {"id": "Observation.method", "path": "Observation.method", "min": 1},
+        {"id": "Observation.value[x]", "path": "Observation.value[x]", "min": 1,
+         "type": [{"code": "CodeableConcept"}], "binding": {"strength": "required",
+             "valueSet": f"{CANONICAL_BASE}/ValueSet/veredito-qualidade-imagem|{PROFILE_VERSION}"}},
+        {"id": "Observation.component", "path": "Observation.component", "min": 1},
+        {"id": "Observation.component.code", "path": "Observation.component.code",
+         "binding": {"strength": "required",
+             "valueSet": f"{CANONICAL_BASE}/ValueSet/criterio-qualidade-imagem|{PROFILE_VERSION}"}},
+        {"id": "Observation.note", "path": "Observation.note", "min": 1},
+    ],
+)
+PROFILES["HealPlusModeloQualidadeImagem"] = _definicao_estrutura(
+    url=QUALITY_DEVICE_PROFILE, resource_id="HealPlusModeloQualidadeImagem",
+    name="HealPlusModeloQualidadeImagem", title="Algoritmo de qualidade de imagem",
+    description="Algoritmo experimental registrado pelo servidor, com versões e hash real do artefato.",
+    resource_type="Device", elements=[
+        {"id": "Device.identifier", "path": "Device.identifier", "min": 1},
+        {"id": "Device.version", "path": "Device.version", "min": 1},
+        {"id": "Device.version.type", "path": "Device.version.type", "min": 1},
+        {"id": "Device.version.value", "path": "Device.version.value", "min": 1},
+    ],
+)
+PROFILES["HealPlusProvenienciaAnaliseQualidade"] = _definicao_estrutura(
+    url=QUALITY_PROVENANCE_PROFILE, resource_id="HealPlusProvenienciaAnaliseQualidade",
+    name="HealPlusProvenienciaAnaliseQualidade", title="Proveniência da análise de qualidade",
+    description="Vincula resultado, fotografia original, algoritmo e protocolo versionado.",
+    resource_type="Provenance", elements=[
+        {"id": "Provenance.target", "path": "Provenance.target", "min": 1},
+        {"id": "Provenance.agent", "path": "Provenance.agent", "min": 1},
+        {"id": "Provenance.entity", "path": "Provenance.entity", "min": 1},
+        {"id": "Provenance.policy", "path": "Provenance.policy", "min": 1},
+    ],
+)
+
 OPERATION_DEFINITION = {
     "resourceType": "OperationDefinition",
     "id": "avaliar-feridas",
     "url": "https://healplus.com.br/fhir/OperationDefinition/avaliar-feridas",
+    "version": PROFILE_VERSION,
     "name": "AvaliarFeridas",
     "title": "Submeter avaliação de feridas",
     "status": "active",
-    "date": "2026-10-05",
+    "date": "2026-11-16",
     "publisher": "HealPlus",
     "description": (
         "Submete um Bundle de avaliação clínica de feridas e inicia uma "
@@ -277,7 +462,7 @@ OPERATION_DEFINITION = {
             "min": 1,
             "max": "1",
             "type": "Bundle",
-            "targetProfile": [HEALPLUS_WOUND_ASSESSMENT_BUNDLE_PROFILE],
+            "targetProfile": [_versioned(HEALPLUS_WOUND_ASSESSMENT_BUNDLE_PROFILE)],
         },
         {
             "name": "return",
@@ -285,7 +470,7 @@ OPERATION_DEFINITION = {
             "min": 1,
             "max": "1",
             "type": "Task",
-            "targetProfile": [HEALPLUS_ANALYSIS_TASK_PROFILE],
+            "targetProfile": [_versioned(HEALPLUS_ANALYSIS_TASK_PROFILE)],
         },
     ],
 }
@@ -304,9 +489,10 @@ def metadados(
             "name": "HealPlusAvaliacaoFeridaIntakeCapabilityStatement",
             "title": "Capacidades FHIR R4 do HealPlus",
             "status": "active",
-            "date": "2026-10-05",
+            "date": "2026-11-16",
+            "version": PROFILE_VERSION,
             "kind": "instance",
-            "software": {"name": "API HealPlus de Avaliação de Feridas"},
+            "software": {"name": "API HealPlus de Avaliação de Feridas", "version": SOFTWARE_VERSION},
             "implementation": {
                 "description": "Intake de avaliação clínica de feridas FHIR R4 HealPlus"
             },
@@ -315,39 +501,56 @@ def metadados(
             "rest": [
                 {
                     "mode": "server",
+                    "security": {
+                        "description": (
+                            "Authorization: Bearer com credenciais provisionadas por cliente; "
+                            "leituras clínicas restritas ao cliente que submeteu e auditoria persistida. "
+                            "Não há emissão de tokens OAuth ou SMART Backend Services neste servidor. "
+                            "Use TLS na implantação. Recursos de conformidade são públicos."
+                        ),
+                    },
                     "resource": [
                         {
                             "type": "Task",
-                            "profile": HEALPLUS_ANALYSIS_TASK_PROFILE,
+                            "profile": _versioned(HEALPLUS_ANALYSIS_TASK_PROFILE),
                             "interaction": [{"code": "read"}],
                         },
                         {
                             "type": "Bundle",
-                            "profile": HEALPLUS_WOUND_ASSESSMENT_BUNDLE_PROFILE,
+                            "profile": _versioned(HEALPLUS_WOUND_ASSESSMENT_BUNDLE_PROFILE),
                             "interaction": [{"code": "read"}],
                         },
                         {
                             "type": "Encounter",
-                            "profile": HEALPLUS_ENCOUNTER_PROFILE,
+                            "profile": _versioned(HEALPLUS_ENCOUNTER_PROFILE),
                             "interaction": [{"code": "read"}],
                         },
                         {
                             "type": "Condition",
-                            "profile": HEALPLUS_CONDITION_PROFILE,
+                            "profile": _versioned(HEALPLUS_CONDITION_PROFILE),
                             "interaction": [{"code": "read"}],
                         },
                         {
                             "type": "Observation",
-                            "profile": HEALPLUS_OBSERVATION_PROFILES[
+                            "profile": _versioned(HEALPLUS_OBSERVATION_PROFILES[
                                 "HealPlusDimensoesFerida"
-                            ],
+                            ]),
+                            "supportedProfile": [_versioned(QUALITY_PROFILE)],
                             "interaction": [{"code": "read"}],
                         },
                         {
                             "type": "Media",
-                            "profile": HEALPLUS_MEDIA_PROFILE,
+                            "profile": _versioned(HEALPLUS_MEDIA_PROFILE),
                             "interaction": [{"code": "read"}],
                         },
+                        {"type": "Patient", "profile": _versioned(HEALPLUS_PATIENT_PROFILE),
+                         "interaction": [{"code": "read"}]},
+                        {"type": "Practitioner", "profile": _versioned(HEALPLUS_PRACTITIONER_PROFILE),
+                         "interaction": [{"code": "read"}]},
+                        {"type": "Device", "supportedProfile": [_versioned(QUALITY_DEVICE_PROFILE)],
+                         "interaction": [{"code": "read"}]},
+                        {"type": "Provenance", "supportedProfile": [_versioned(QUALITY_PROVENANCE_PROFILE)],
+                         "interaction": [{"code": "read"}]},
                     ],
                     "operation": [
                         {
@@ -394,3 +597,27 @@ def definicao_estrutura(
             "StructureDefinition não encontrada",
         )
     return fhir_response(profile, media_type=response_media_type)
+
+
+@router.get("/api/fhir/r4/CodeSystem/{terminology_id}", response_class=FHIRJSONResponse)
+def sistema_codigos(
+    terminology_id: str,
+    response_media_type: str = Depends(require_fhir_accept),
+) -> FHIRJSONResponse:
+    """Publica os códigos técnicos experimentais e suas definições."""
+    resource = CODE_SYSTEMS.get(terminology_id)
+    if resource is None:
+        raise FHIRRequestError(404, "not-found", "CodeSystem não encontrado")
+    return fhir_response(resource, media_type=response_media_type)
+
+
+@router.get("/api/fhir/r4/ValueSet/{terminology_id}", response_class=FHIRJSONResponse)
+def conjunto_valores(
+    terminology_id: str,
+    response_media_type: str = Depends(require_fhir_accept),
+) -> FHIRJSONResponse:
+    """Publica os conjuntos fechados de códigos da saída técnica."""
+    resource = VALUE_SETS.get(terminology_id)
+    if resource is None:
+        raise FHIRRequestError(404, "not-found", "ValueSet não encontrado")
+    return fhir_response(resource, media_type=response_media_type)
